@@ -126,9 +126,9 @@ The reply should be published to:
 <deployment>.<gRPC service name>.<RPC name>.reply.<request ID>
 ```
 
-The reply should have a header specifying the schema, wchi would be the RPC response type or error.
+The reply should have a header specifying the schema, which would be the RPC response type or error.
 
-Requests may be discarded (with nothing published to the reply subject), by publishing to a dead-letter-queue. This could be because some headers are invalid, the request could not be delivered or has expired (before any reply was received).
+Only errors from the intended service should be published to the reply stream. Requests may be aborted, by publishing to a dead-letter-queue, dlq, with matching request ID. This could be because some headers are invalid, the request could not be delivered or has expired (before any reply was received).
 
 The limitations of the above subject hierachy is that only 1 service is responsible pr deployment.
 
@@ -146,13 +146,11 @@ The reply should be published to:
 <deployment>.<gRPC service name>.<RPC name>.reply_stream.<request ID>.<sequence>
 ```
 
-The `sequence` must be an increasing number, greater than 0, gaps are allowed. To signal that the stream is closed, an empty message with the `sequence` set to `EOF` should be published. The message may also contain an error message to signal that the reply stream ended with some error.
+The `sequence` must be an increasing number, greater than 0, gaps are allowed. To signal that the stream is closed, an empty message with the `sequence` set to `EOF` should be published. The message may also contain an error message to signal that the reply stream ended with some error from the service. Only errors from services should be published to the reply stream, other intermediateries should publish to the dlq.
+
+The gateways must ensure that the remote reply stream is published in the same order to the local reply stream. If the stream is broken (e.g. when communication is down and the reply stream expires on the remote), the stream should be aborted.
 
 The remote gateway must remember the source sequence that already has been acknowledged (or it must be able to query the receiving gateway). Otherwise all the replies must be sent again after a restart.
-
-The reply may also be aborted if a matching `requestID` is published to the dlq.
-
-The gateways must ensure that the remote reply stream is published in the same order to the local reply stream. If this is not possible, the stream should be aborted. Then the client can issue a new request.
 
 ### Headers
 
