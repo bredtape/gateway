@@ -128,7 +128,7 @@ The reply should be published to:
 
 The reply should have a header specifying the schema, which would be the RPC response type or error.
 
-Only errors from the intended service should be published to the reply stream. Requests may be aborted, by publishing to a dead-letter-queue, dlq, with matching request ID. This could be because some headers are invalid, the request could not be delivered or has expired (before any reply was received).
+Only errors from the intended service should be published to the reply stream. Requests may be aborted, by publishing to a dead-letter-queue, dlq, with matching request ID. This could be because some headers are invalid, the request could not be delivered, or has expired (before any reply was received), or is expected to expire before the request can be processed and the reply delivered.
 
 The limitations of the above subject hierachy is that only 1 service is responsible pr deployment.
 
@@ -146,7 +146,7 @@ The reply should be published to:
 <deployment>.<gRPC service name>.<RPC name>.reply_stream.<request ID>.<sequence>
 ```
 
-The `sequence` must be an increasing number, greater than 0, gaps are allowed. To signal that the stream is closed, an empty message with the `sequence` set to `EOF` should be published. The message may also contain an error message to signal that the reply stream ended with some error from the service. Only errors from services should be published to the reply stream, other intermediateries should publish to the dlq.
+The `sequence` must be an increasing number, greater than 0, gaps are allowed. To signal that the stream is closed, an empty message with the `sequence` set to `EOS` (end-of- stream) should be published. The message may also contain an error message to signal that the reply stream ended with some error from the service. Only errors from services should be published to the reply stream, other intermediateries should publish to the dlq.
 
 The gateways must ensure that the remote reply stream is published in the same order to the local reply stream. If the stream is broken (e.g. when communication is down and the reply stream expires on the remote), the stream should be aborted.
 
@@ -154,18 +154,47 @@ The remote gateway must remember the source sequence that already has been ackno
 
 ### Headers
 
-| Name                             | Description                                                                                     | Example value                                                 | Required                                               |
-| -------------------------------- | ----------------------------------------------------------------------------------------------- | ------------------------------------------------------------- | ------------------------------------------------------ |
-| gateway-request-created-at       | When the request was created, formatted as RFC3339                                              | 2006-01-02T15:04:05Z07:00                                     | no, but recommended for both the request and the reply |
-| gateway-request-expires-at       | After which time the request may discarded/ignored. RFC3339                                     | 2006-01-02T15:04:05Z07:00                                     | required for requests                                  |
-| gateway-message-content-type     | Name of the encoding used                                                                       | application/protobuf, application/protojson, application/json | yes                                                    |
-| gateway-previous-source-sequence | Used for reply stream. The source sequence of the previous reply. Set to 0 for the first reply. | 123                                                           | Required for stream                                    |
-| gateway-source-sequence          | Used for reply stream.                                                                          | 124                                                           | Required for stream                                    |
+gRPC protocol reference https://github.com/grpc/grpc/blob/master/doc/PROTOCOL-HTTP2.md
+
+#### nats headers
+
+For requests:
+
+| Name              | Description                                                                                          | Example value                                  | Required                                                            |
+| ----------------- | ---------------------------------------------------------------------------------------------------- | ---------------------------------------------- | ------------------------------------------------------------------- |
+| grpc-path         | With fully specified package name `/<package>.<service>/<method>`. Equivalent to ":path" gRPC header | /google.pubsub.v2.PublisherService/CreateTopic | yes                                                                 |
+| grpc-message-type | Fully qualified proto message name                                                                   | google.rpc.Status                              | yes                                                                 |
+| grpc-timeout      | Timeout after which the request may discarded/ignored. See gRPC protocol spec.                       | 5S (5 second)                                  | should be set. Services and Gateways may overrule the timeout value |
+| content-type      | Name of the encoding used. From the gRPC protocol spec                                               | application/grpc+proto, application/grpc+json  | yes                                                                 |
+
+For replies:
+
+| Name                             | Description                                                                                     | Example value                                 | Required                          |
+| -------------------------------- | ----------------------------------------------------------------------------------------------- | --------------------------------------------- | --------------------------------- |
+| grpc-message-type                | Fully qualified proto message name                                                              | google.rpc.Status                             | yes                               |
+| grpc-status                      | Response code for. Se gRPC protocol spec                                                        | 3 (invalid argument)                          | yes. May be omitted when no error |
+| content-type                     | Name of the encoding used. From the gRPC protocol spec                                          | application/grpc+proto, application/grpc+json | yes                               |
+| gateway-source-sequence          | Used for reply stream.                                                                          | 124                                           | for reply stream                  |
+| gateway-previous-source-sequence | Used for reply stream. The source sequence of the previous reply. Set to 0 for the first reply. | 123                                           | for reply stream                  |
+
+The grpc-timeout is relative. To get an absolute time the nats publish time of the message should be used. Any intermediary transfer or processing time, should be deducted, before passing on the request.
 
 ## Retention
 
-Requests and replices should be expired in nats. This is configured pr stream. The expiration should match durations used for gateway-request-expires-at, e.g. set the stream retention to expire in double the duration used for gateway-request-expires-at.
+Requests and replices should be expired in nats. This is configured pr stream. The expiration should be proportional to grpc-timeout, e.g. set the stream retention to expire in double the duration used for grpc-timeout.
 
 ## One-way sync of nats Jetstream streams
 
 Another use-case is to have a nats Jetstream replicated between `deployments`. This could be built upon the "request and reply stream", then mapped on the receiving site to the required subject pattern.
+
+## Secure
+
+TLS should be used for all gRPC and nats connections.
+
+## Auth
+
+nats nkey authentication and authorization should be used. gRPC auth TBD
+
+### Consider
+
+- request tracing
