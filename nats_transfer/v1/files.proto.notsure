@@ -1,0 +1,104 @@
+syntax = "proto3";
+
+message Bundle struct {
+    string message_id = 1;
+
+    repeated Acknowledge acknowledges = 2;
+    repeated Request requests = 3;
+    repeated Reply replies = 4;
+    repeated ReplyStream reply_streams = 5;
+}
+
+message Acknowledge {
+  // message ID to acknowledge (this message itself has no message_id)
+  string message_id = 1;
+
+  // is negative acknowledge
+  bool is_nak = 2;
+}
+
+
+message Request {
+  // message ID. Unique across all messages
+  string message_id = 1;
+
+  string request_id = 2;
+
+  // request deployment destination
+  string request_destination = 3;
+
+  // reply deployment source
+  string reply_source = 4;
+
+  // format '/<package>.<service>/<method>'
+  string path = 5;
+
+  // timestamp of when the request expires, in seconds since Unix epoch
+  // an absolute timestamp is needed, when the message passes through a 3rd party
+  // where the delay is unknown (so cannot use the relative 'timeout')
+  double request_expiration_timestamp = 6;
+
+  // fully qualified proto message name
+  string message_type = 7;
+
+  map<string,string> headers = 8;
+
+  bytes payload = 9;
+}
+
+
+message Reply {
+  // message ID. Unique across all messages
+  string message_id = 1;
+
+  string request_id = 2;
+
+  // request deployment destination
+  string request_destination = 3;
+
+  // reply deployment source
+  string reply_source = 4;
+
+  // timestamp of when the request expires, in seconds since Unix epoch
+  // the reply should be forwarded, even though the request may have expired
+  double request_expiration_timestamp = 6;
+
+  // fully qualified proto message name
+  string message_type = 7;
+
+  map<string,string> headers = 8;
+
+  bytes payload = 9;
+
+  // status code
+  uint32 status = 10;
+}
+
+message ReplyStream {
+  // message ID. Unique across all messages
+  string message_id = 1;
+
+  string request_id = 2;
+
+  // request deployment destination
+  string request_destination = 3;
+
+  // reply deployment source
+  string reply_source = 4;
+
+  // timestamp of when the request expires, in seconds since Unix epoch
+  double request_expiration_timestamp = 6;
+
+  // fully qualified proto message name
+  string message_type = 7;
+
+  bytes payload = 9;
+
+  // status code. Non-zero status will close the stream
+  uint32 status = 10;
+
+  uint64 source_sequence = 11;
+
+  uint64 previous_source_sequence = 12;
+}
+

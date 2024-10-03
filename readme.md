@@ -117,16 +117,18 @@ When transferring files between local and remote an ACK (acknowledge) is written
 Given a gRPC service a RPC could be mapped to the following subject schema:
 
 ```
-<deployment>.<gRPC service name>.<RPC name>.request.<request ID>
+<request destination deployment>.<reply source deployment>.<gRPC service name>.<RPC name>.request.<request ID>
 ```
 
 The reply should be published to:
 
 ```
-<deployment>.<gRPC service name>.<RPC name>.reply.<request ID>
+<reply source deployment>.<request destination deployment>.<gRPC service name>.<RPC name>.reply.<request ID>
 ```
 
-The reply should have a header specifying the schema, which would be the RPC response type or error.
+Note that `source deployment` is first, to make subscription simpler.
+
+The reply should have a header specifying the schema/type, which would be the RPC response type or error.
 
 Only errors from the intended service should be published to the reply stream. Requests may be aborted, by publishing to a dead-letter-queue, dlq, with matching request ID. This could be because some headers are invalid, the request could not be delivered, or has expired (before any reply was received), or is expected to expire before the request can be processed and the reply delivered.
 
@@ -137,13 +139,13 @@ The limitations of the above subject hierachy is that only 1 service is responsi
 Given a gRPC service a RPC could be mapped to the following subject schema:
 
 ```
-<deployment>.<gRPC service name>.<RPC name>.request_stream.<request ID>
+<request destination deployment>.<reply source deployment>.<gRPC service name>.<RPC name>.request_stream.<request ID>
 ```
 
 The reply should be published to:
 
 ```
-<deployment>.<gRPC service name>.<RPC name>.reply_stream.<request ID>.<sequence>
+<reply source deployment>.<request destination deployment>.<gRPC service name>.<RPC name>.reply_stream.<request ID>.<sequence>
 ```
 
 The `sequence` must be an increasing number, greater than 0, gaps are allowed. To signal that the stream is closed, an empty message with the `sequence` set to `EOS` (end-of- stream) should be published. The message may also contain an error message to signal that the reply stream ended with some error from the service. Only errors from services should be published to the reply stream, other intermediateries should publish to the dlq.
@@ -165,19 +167,39 @@ For requests:
 | grpc-path         | With fully specified package name `/<package>.<service>/<method>`. Equivalent to ":path" gRPC header | /google.pubsub.v2.PublisherService/CreateTopic | yes                                                                 |
 | grpc-message-type | Fully qualified proto message name                                                                   | google.rpc.Status                              | yes                                                                 |
 | grpc-timeout      | Timeout after which the request may discarded/ignored. See gRPC protocol spec.                       | 5S (5 second)                                  | should be set. Services and Gateways may overrule the timeout value |
-| content-type      | Name of the encoding used. From the gRPC protocol spec                                               | application/grpc+proto, application/grpc+json  | yes                                                                 |
+
+Requests must not be encoded.
 
 For replies:
 
 | Name                             | Description                                                                                     | Example value                                 | Required                          |
 | -------------------------------- | ----------------------------------------------------------------------------------------------- | --------------------------------------------- | --------------------------------- |
-| grpc-message-type                | Fully qualified proto message name                                                              | google.rpc.Status                             | yes                               |
-| grpc-status                      | Response code for. Se gRPC protocol spec                                                        | 3 (invalid argument)                          | yes. May be omitted when no error |
+| grpc-message-type                | Fully qualified proto message name.                                                             | google.rpc.Status                             | yes                               |
+| grpc-status                      | Response code for. Se gRPC protocol spec.                                                       | 3 (=invalid argument)                         | yes. May be omitted when no error |
 | content-type                     | Name of the encoding used. From the gRPC protocol spec                                          | application/grpc+proto, application/grpc+json | yes                               |
 | gateway-source-sequence          | Used for reply stream.                                                                          | 124                                           | for reply stream                  |
 | gateway-previous-source-sequence | Used for reply stream. The source sequence of the previous reply. Set to 0 for the first reply. | 123                                           | for reply stream                  |
 
 The grpc-timeout is relative. To get an absolute time the nats publish time of the message should be used. Any intermediary transfer or processing time, should be deducted, before passing on the request.
+
+#### gRPC headers
+
+For requests:
+
+| Name                       | Description                                                                    | Example value | Required                                                            |
+| -------------------------- | ------------------------------------------------------------------------------ | ------------- | ------------------------------------------------------------------- |
+| gateway-request-deployment | At which deployment the request should be processed                            | xx            | for non-local requests                                              |
+| gateway-reply-deployment   | The source deployment of the request and where the reply should be routed to   | yy            | for non-local requests                                              |
+| gateway-request-id         |                                                                                |               | no                                                                  |
+| grpc-timeout               | Timeout after which the request may discarded/ignored. See gRPC protocol spec. | 5S (5 second) | should be set. Services and Gateways may overrule the timeout value |
+
+For replies:
+
+| Name                       | Description                                                                  | Example value | Required               |
+| -------------------------- | ---------------------------------------------------------------------------- | ------------- | ---------------------- |
+| gateway-request-deployment | At which deployment the request should be processed                          | xx            | for non-local requests |
+| gateway-reply-deployment   | The source deployment of the request and where the reply should be routed to | yy            | for non-local requests |
+| gateway-request-id         |                                                                              |               | no                     |
 
 ## Retention
 
