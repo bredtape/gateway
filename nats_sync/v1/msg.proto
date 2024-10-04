@@ -144,22 +144,6 @@ enum DeliverPolicy {
 	DELIVER_POLICY_LAST_PER_SUBJECT = 5;
 }
 
-
-// batch of messages belonging to the same deployment, stream name and subscription
-message MsgBatch {
-  // source stream name
-  string source_stream_name = 1;
-
-  // subscription filters used at the source for this stream
-  repeated string subject_filters = 2;
-
-  ConsumerConfig consumer_config = 3;
-
-  // messages matching the stream name and subject filters
-  // ordered by sequence
-  repeated Msg messages = 4;
-}
-
 // to mirror nats Msg (https://github.com/nats-io/nats.go/blob/main/nats.go)
 message Msg {
   string subject = 1;
@@ -182,6 +166,21 @@ message Msg {
 
   // when the Msg was published to the source. In seconds since Unix epoch
   double publish_timestamp = 6;
+}
+
+// batch of messages belonging to the same deployment, source stream and subscription
+message MsgBatch {
+  // source stream name
+  string source_stream_name = 1;
+
+  // subscription filters used at the source for this stream
+  repeated string subject_filters = 2;
+
+  ConsumerConfig consumer_config = 3;
+
+  // messages matching the stream name and subject filters
+  // ordered by sequence
+  repeated Msg messages = 4;
 }
 
 // acknowledge combination of stream name, subject and sequence

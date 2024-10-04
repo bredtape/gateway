@@ -1,0 +1,30 @@
+
+volumes:
+  nats-dataA:
+  nats-dataB:
+
+services:
+  natsA:
+    image: ${NATS_IMAGE}
+    command:
+      --debug
+      --name natsA
+      --jetstream
+      --store_dir /data
+    volumes:
+      - nats-dataA:/data
+    ports:
+      - "4222:4222"
+
+  natsB:
+    image: ${NATS_IMAGE}
+    command:
+      --debug
+      --name natsB
+      --jetstream
+      --store_dir /data
+    volumes:
+      - nats-dataB:/data
+    ports:
+      - "4322:4222" # non-standard port
+

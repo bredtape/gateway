@@ -3,6 +3,7 @@ module github.com/bredtape/gateway
 go 1.23.1
 
 require (
+	github.com/bredtape/retry v0.0.1
 	github.com/cespare/xxhash v1.1.0
 	github.com/fsnotify/fsnotify v1.7.0
 	github.com/nats-io/nats.go v1.37.0
@@ -14,6 +15,7 @@ require (
 
 require (
 	github.com/davecgh/go-spew v1.1.1 // indirect
+	github.com/google/uuid v1.6.0
 	github.com/klauspost/compress v1.17.10 // indirect
 	github.com/nats-io/nkeys v0.4.7 // indirect
 	github.com/nats-io/nuid v1.0.1 // indirect

@@ -15,7 +15,7 @@ func TestFileIODirShouldExists(t *testing.T) {
 	c := getConfig(t)
 	c.IncomingDir = "./fail"
 
-	_, err := NewFileIO(c)
+	_, err := NewFileExchange(c)
 	assert.Error(t, err)
 	assert.ErrorIs(t, err, ErrDirectoryDoesNotExists)
 }
@@ -30,11 +30,11 @@ func TestFileIO(t *testing.T) {
 	configB.IncomingDir = configA.OutgoingDir
 	configB.OutgoingDir = configA.IncomingDir
 
-	exA, err := NewFileIO(configA)
+	exA, err := NewFileExchange(configA)
 	assert.NoError(t, err)
 
 	// configure to consume other direction
-	exB, err := NewFileIO(configB)
+	exB, err := NewFileExchange(configB)
 	assert.NoError(t, err)
 
 	chIncB, err := exB.StartReceiving(ctx)
@@ -49,9 +49,9 @@ func TestFileIO(t *testing.T) {
 	batch1 := &v1.MessageExchange{
 		Messages: []*v1.MsgBatch{
 			{
-				StreamName:     "stream1",
-				SubjectFilters: nil,
-				Messages:       []*v1.Msg{msg1}}}}
+				SourceStreamName: "stream1",
+				SubjectFilters:   nil,
+				Messages:         []*v1.Msg{msg1}}}}
 
 	// send batch from A to B
 	err = exA.Write(ctx, batch1)
@@ -81,11 +81,11 @@ func TestFileIOWatchAfterWrite(t *testing.T) {
 	configB.IncomingDir = configA.OutgoingDir
 	configB.OutgoingDir = configA.IncomingDir
 
-	exA, err := NewFileIO(configA)
+	exA, err := NewFileExchange(configA)
 	assert.NoError(t, err)
 
 	// configure to consume other direction
-	exB, err := NewFileIO(configB)
+	exB, err := NewFileExchange(configB)
 	assert.NoError(t, err)
 
 	msg1 := &v1.Msg{

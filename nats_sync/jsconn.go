@@ -11,9 +11,9 @@ import (
 
 type JSConfig struct {
 	// nats urls, separated by ,
-	NatsURLS string
+	URLs string
 
-	NatsOptions []nats.Option
+	Options []nats.Option
 
 	// optional prefix for jetstream api
 	JetstreamAPIPrefix string
@@ -24,12 +24,12 @@ func (c *JSConfig) WithSeedFile(seedFile string) error {
 	if err != nil {
 		return err
 	}
-	c.NatsOptions = append(c.NatsOptions, opt)
+	c.Options = append(c.Options, opt)
 	return nil
 }
 
 func (c *JSConfig) WithSecure(secure *tls.Config) error {
-	c.NatsOptions = append(c.NatsOptions, nats.Secure(secure))
+	c.Options = append(c.Options, nats.Secure(secure))
 	return nil
 }
 
@@ -71,7 +71,7 @@ func (c *JSConn) Connect(ctx context.Context) (jetstream.JetStream, error) {
 	}
 
 	// no existing connection, connect
-	nc, err := nats.Connect(c.config.NatsURLS, c.config.NatsOptions...)
+	nc, err := nats.Connect(c.config.URLs, c.config.Options...)
 	if err != nil {
 		return nil, errors.Wrap(err, "failed to connect or bad options")
 	}

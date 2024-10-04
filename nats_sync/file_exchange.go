@@ -32,11 +32,11 @@ func (c FileExchangeConfig) Validate() error {
 	if path.Clean(c.IncomingDir) == path.Clean(c.OutgoingDir) {
 		return errors.New("incoming and outgoing dir must not be the same")
 	}
-	if c.PollingInterval < time.Second {
-		return errors.New("pollingInterval must be at least 1 sec")
+	if c.PollingInterval < time.Millisecond {
+		return errors.New("pollingInterval must be at least 1 ms")
 	}
-	if c.PollingRetryInterval < time.Second {
-		return errors.New("pollingRetryInterval must be at least 1 sec")
+	if c.PollingRetryInterval < time.Millisecond {
+		return errors.New("pollingRetryInterval must be at least 1 ms")
 	}
 	return nil
 }
@@ -71,7 +71,7 @@ type FileExchange struct {
 // Files should be written with a . prefix, then renamed. Alternatively written to another directory, then renamed
 // Returns ErrDirectoryDoesNotExists if the directories does not exists
 // TODO: Also check that the dirs are read/write-able
-func NewFileIO(c FileExchangeConfig) (*FileExchange, error) {
+func NewFileExchange(c FileExchangeConfig) (*FileExchange, error) {
 	if err := c.Validate(); err != nil {
 		return nil, err
 	}
