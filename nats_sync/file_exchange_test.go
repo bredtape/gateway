@@ -1,4 +1,4 @@
-package nats_transfer
+package nats_sync
 
 import (
 	"context"
@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	v1 "github.com/bredtape/gateway/nats_transfer/v1"
+	v1 "github.com/bredtape/gateway/nats_sync/v1"
 	"github.com/stretchr/testify/assert"
 )
 
@@ -30,14 +30,14 @@ func TestFileIO(t *testing.T) {
 	configB.IncomingDir = configA.OutgoingDir
 	configB.OutgoingDir = configA.IncomingDir
 
-	fioA, err := NewFileIO(configA)
+	exA, err := NewFileIO(configA)
 	assert.NoError(t, err)
 
 	// configure to consume other direction
-	fioB, err := NewFileIO(configB)
+	exB, err := NewFileIO(configB)
 	assert.NoError(t, err)
 
-	chIncB, err := fioB.StartWatch(ctx)
+	chIncB, err := exB.StartReceiving(ctx)
 	assert.NoError(t, err)
 
 	msg1 := &v1.Msg{
@@ -54,7 +54,7 @@ func TestFileIO(t *testing.T) {
 				Messages:       []*v1.Msg{msg1}}}}
 
 	// send batch from A to B
-	err = fioA.Write(batch1)
+	err = exA.Write(ctx, batch1)
 	assert.NoError(t, err)
 	t.Log("wrote batch")
 
@@ -81,11 +81,11 @@ func TestFileIOWatchAfterWrite(t *testing.T) {
 	configB.IncomingDir = configA.OutgoingDir
 	configB.OutgoingDir = configA.IncomingDir
 
-	fioA, err := NewFileIO(configA)
+	exA, err := NewFileIO(configA)
 	assert.NoError(t, err)
 
 	// configure to consume other direction
-	fioB, err := NewFileIO(configB)
+	exB, err := NewFileIO(configB)
 	assert.NoError(t, err)
 
 	msg1 := &v1.Msg{
@@ -97,17 +97,17 @@ func TestFileIOWatchAfterWrite(t *testing.T) {
 	batch1 := &v1.MessageExchange{
 		Messages: []*v1.MsgBatch{
 			{
-				StreamName:     "stream1",
-				SubjectFilters: nil,
-				Messages:       []*v1.Msg{msg1}}}}
+				SourceStreamName: "stream1",
+				SubjectFilters:   nil,
+				Messages:         []*v1.Msg{msg1}}}}
 
 	// send batch from A to B
-	err = fioA.Write(batch1)
+	err = exA.Write(ctx, batch1)
 	assert.NoError(t, err)
 	t.Log("wrote batch")
 
 	t.Log("start watch at B")
-	chIncB, err := fioB.StartWatch(ctx)
+	chIncB, err := exB.StartReceiving(ctx)
 	assert.NoError(t, err)
 
 	t.Log("wait for incoming at B")
@@ -123,8 +123,8 @@ func TestFileIOWatchAfterWrite(t *testing.T) {
 	}
 }
 
-func getConfig(t *testing.T) Config {
-	return Config{
+func getConfig(t *testing.T) FileExchangeConfig {
+	return FileExchangeConfig{
 		IncomingDir:          t.TempDir(),
 		OutgoingDir:          t.TempDir(),
 		PollingInterval:      time.Second,
