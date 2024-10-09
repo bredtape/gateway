@@ -117,7 +117,7 @@ func (ex *FileExchange) StartReceiving(ctx context.Context) (<-chan *v1.MessageE
 					return
 				}
 
-				log2 := log.With("source", "polling", "filename", filename)
+				log2 := log.With("source", "polling", "basename", path.Base(filename))
 				log2.Log(ctx, slog.LevelDebug-3, "received filename")
 				msg, err := ex.consumeFile(filename)
 				if err != nil {
@@ -135,7 +135,7 @@ func (ex *FileExchange) StartReceiving(ctx context.Context) (<-chan *v1.MessageE
 				if !ok {
 					return
 				}
-				log2 := log.With("source", "polling", "filename", event.Name, "op", event.Op.String())
+				log2 := log.With("source", "polling", "basename", path.Base(event.Name), "op", event.Op.String())
 				log2.Log(ctx, slog.LevelDebug-3, "received event")
 
 				if event.Op.Has(fsnotify.Create) {
@@ -147,7 +147,7 @@ func (ex *FileExchange) StartReceiving(ctx context.Context) (<-chan *v1.MessageE
 						case <-ctx.Done():
 							return
 						case resultCh <- msg:
-							log2.Log(ctx, slog.LevelDebug-3, "relayed message exchange", "filename", event.Name)
+							log2.Log(ctx, slog.LevelDebug-3, "relayed message exchange", "basename", path.Base(event.Name))
 						}
 					}
 				}
@@ -161,7 +161,7 @@ func (ex *FileExchange) StartReceiving(ctx context.Context) (<-chan *v1.MessageE
 		}
 	}()
 
-	// Add a path.
+	// start watching incoming directory
 	err = watcher.Add(ex.inDir)
 	if err != nil {
 		return nil, errors.Wrap(err, "failed to watch incoming directory")
@@ -184,7 +184,7 @@ func (ex *FileExchange) Write(_ context.Context, batch *v1.MessageExchange) erro
 	filename := path.Join(ex.outDir, base)
 	tmpFilename := path.Join(ex.outDir, "."+base)
 
-	log = log.With("filename", filename, "tmpFilename", tmpFilename)
+	log = log.With("baseFilename", path.Base(filename), "baseTmpFilename", path.Base(tmpFilename))
 	log.Log(context.Background(), slog.LevelDebug-3, "start writing")
 	err = os.WriteFile(tmpFilename, data, writeFileMode)
 	if err != nil {
@@ -233,10 +233,10 @@ func (ex *FileExchange) consumeFile(filename string) (*v1.MessageExchange, error
 	return &msg, nil
 }
 
-var reFileMatch = regexp.MustCompile(`^([0-9]{6})_([0-9]+).me$`)
+var reBaseMatch = regexp.MustCompile(`^([0-9]{6})_([0-9]+).me$`)
 
 func isRelevantFile(filename string) bool {
-	return reFileMatch.MatchString(path.Base(filename))
+	return reBaseMatch.MatchString(path.Base(filename))
 }
 
 func (ex *FileExchange) createFilename(data []byte) string {
@@ -253,7 +253,7 @@ func verifyHash(data []byte, filename string) error {
 	d.Write(data) // does not error
 	hash := d.Sum64()
 
-	matches := reFileMatch.FindStringSubmatch(path.Base(filename))
+	matches := reBaseMatch.FindStringSubmatch(path.Base(filename))
 	if len(matches) != 3 {
 		return errors.New("filename does not match expected format")
 	}

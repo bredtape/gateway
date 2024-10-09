@@ -36,7 +36,7 @@ message SubscribeRequest {
   string target_stream_name = 5;
 
   // subscription filters used at the source for this stream
-  repeated string subject_filters = 6;
+  repeated string filter_subjects = 6;
 
   ConsumerConfig consumer_config = 7;
 }
@@ -59,7 +59,7 @@ message SubscribeResponse {
   string target_stream_name = 5;
 
   // subscription filters used at the source for this stream
-  repeated string subject_filters = 6;
+  repeated string filter_subjects = 6;
 
   ConsumerConfig consumer_config = 7;
 }
@@ -83,7 +83,7 @@ message UnsubscribeRequest {
   string target_stream_name = 5;
 
   // subscription filters used at the source for this stream
-  repeated string subject_filters = 6;
+  repeated string filter_subjects = 6;
 }
 
 message UnsubscribeResponse {
@@ -103,12 +103,16 @@ message UnsubscribeResponse {
   // subject hierachy must match the source stream
   string target_stream_name = 5;
 
-  // subscription filters used at the source for this stream
-  repeated string subject_filters = 6;
+  // set of filters used at the source for this stream
+  repeated string filter_subjects = 6;
 
 }
 
 message ConsumerConfig {
+  // deliver policy at the source deployment. Used on initial subscription
+  // and when gaps have been detected between source and target (because messages have been
+  // deleted due to retention policy at the source/target).
+  // Otherwise, sequence will be used.
   DeliverPolicy deliver_policy = 1;
 
   // used when deliver policy is by start sequence
@@ -158,48 +162,54 @@ message Msg {
   // source sequence
   uint64 source_sequence = 4;
 
-  // sequence of the previous Msg that belongs to the same stream.
-  // May have gaps (depending on the source subscription filter used).
-  // This is needed to ensure order and completeness of all Msg
-  // NB: The first message received when starting a subscription may be 0
-  uint64 previous_source_sequence = 5;
-
   // when the Msg was published to the source. In seconds since Unix epoch
   double publish_timestamp = 6;
 }
 
 // batch of messages belonging to the same deployment, source stream and subscription
 message MsgBatch {
+  // batch id, a unique uuid per batch
+  // This is needed because old irrelevant messages may be delivered, and
+  // must be ignored
+  bytes batch_id = 1;
+
+  // target deployment
+  string target_deployment = 2;
+
   // source stream name
-  string source_stream_name = 1;
+  string source_stream_name = 3;
 
-  // subscription filters used at the source for this stream
-  repeated string subject_filters = 2;
+  // subscription filters used at the source for this stream.
+  repeated string filter_subjects = 4;
 
-  ConsumerConfig consumer_config = 3;
+  ConsumerConfig consumer_config = 5;
 
-  // messages matching the stream name and subject filters
-  // ordered by sequence
-  repeated Msg messages = 4;
+  // messages matching the stream name and subject filters.
+  // Ordered by sequence. Must not be empty. May have gaps in sequence.
+  repeated Msg messages = 6;
 }
 
 // acknowledge combination of stream name, subject and sequence
 message Acknowledge {
-  string source_stream_name = 1;
-  uint64 source_sequence = 2;
-  string subject = 3;
+  // batch id, matching MsgBatch
+  bytes batch_id = 1;
 
-  // to indicate not-acknowledge, in which case the subscription will be restarted
-  // If lowest_ack_sequence is set, the subscription will resume from that sequence
-  bool is_nak = 4;
+  string source_stream_name = 2;
+
+  // source sequence number from (inclusive)
+  uint64 source_sequence_from = 3;
+
+  // source seqeuence number to (inclusive)
+  uint64 source_sequence_to = 4;
+
+  // to indicate not-acknowledge, in which case the subscription will be restarted.
+  // If lowest_ack_sequence is set, the subscription will resume from that sequence.
+  // Duplicates must be acknowledged
+  bool is_nak = 5;
 
   // reason, should be specified when NAK
   // possible scenarios: message loss/corrupted, message missing (gap, have received newer but is missing some), rejected (because subscription is not active at the target deployment, or a conflicting subscription is active)
-  string reason = 5;
-
-  // lowest source sequence number succesfully received
-  // This may help the source to fast-forward the subscription at startup
-  uint64 lowest_source_sequence_received = 6;
+  string reason = 6;
 }
 
 // message exchange. Used for lower level exchange between deployments using other means of transport than nats
@@ -207,12 +217,12 @@ message MessageExchange {
   string to_deployment = 1;
   string from_deployment = 2;
 
-  repeated Acknowledge acks = 3;
-  repeated MsgBatch messages = 4;
-
   // timestamp of when this message has been sent
-  // used to estimate latency when different deployments.
+  // used to estimate latency between deployments.
   // In seconds since Unix epoch
-  double sent_timestamp = 5;
+  double sent_timestamp = 3;
+
+  repeated Acknowledge acknowledges = 4;
+  repeated MsgBatch messages = 5;
 }
 

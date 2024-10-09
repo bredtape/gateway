@@ -7,8 +7,11 @@ import (
 	"time"
 
 	"github.com/bredtape/gateway"
+	v1 "github.com/bredtape/gateway/nats_sync/v1"
+	rh "github.com/bredtape/gateway/remote_http/v1"
 	"github.com/bredtape/retry"
 	"github.com/google/uuid"
+	"github.com/nats-io/nats.go/jetstream"
 	"github.com/stretchr/testify/assert"
 )
 
@@ -19,6 +22,11 @@ import (
 // start nats sync on each with file exchange for inter-communication
 // create nats subscription stream on each
 // publish subscription to sync the subscription stream itself from A to B
+
+// create "app" stream on A, which are to be synced to B
+// publish Subscription request to sync the "app" stream from A to B directly on both A and B
+// publish messages to the "app" stream on A
+// the messages should be synced to B
 
 // with sync of request/reply stream:
 // create a request and reply stream on each deployment for the NatsSyncService
@@ -77,12 +85,12 @@ func TestNatsSyncLowLevelSync(t *testing.T) {
 		assert.NoError(t, err)
 
 		cs := defaultCommSettings
-		cs.Exchange = ex
 		config := NatsSyncConfig{
 			Deployment:            da,
 			SubscriptionStream:    generateRandomString() + "subscription",
-			CommunicationSettings: map[gateway.Deployment]CommunicationSettings{db: cs}}
-		sync, err := NewNatsSync(js, config)
+			CommunicationSettings: map[gateway.Deployment]CommunicationSettings{db: cs},
+			Exchanges:             map[gateway.Deployment]Exchange{db: ex}}
+		sync, err := StartNatsSync(ctx, js, config)
 		assert.NoError(t, err)
 		syncA = sync
 
@@ -104,12 +112,12 @@ func TestNatsSyncLowLevelSync(t *testing.T) {
 		assert.NoError(t, err)
 
 		cs := defaultCommSettings
-		cs.Exchange = ex
 		config := NatsSyncConfig{
 			Deployment:            db,
 			SubscriptionStream:    generateRandomString() + "subscription",
-			CommunicationSettings: map[gateway.Deployment]CommunicationSettings{da: cs}}
-		sync, err := NewNatsSync(js, config)
+			CommunicationSettings: map[gateway.Deployment]CommunicationSettings{da: cs},
+			Exchanges:             map[gateway.Deployment]Exchange{da: ex}}
+		sync, err := StartNatsSync(ctx, js, config)
 		assert.NoError(t, err)
 		syncB = sync
 
@@ -121,7 +129,7 @@ func TestNatsSyncLowLevelSync(t *testing.T) {
 		t.Logf("created subscription stream on B: %+v", info)
 	}
 
-	// publish subscription directly to nats to enable sync of the subscription stream itself
+	// publish subscription directly to each nats-servers, to enable sync of the subscription stream itself
 	{
 		ack, err := syncA.PublishBootstrapSubscription(ctx, da, db)
 		assert.NoError(t, err)
@@ -132,6 +140,74 @@ func TestNatsSyncLowLevelSync(t *testing.T) {
 		t.Logf("publish bootstrap at B, ack %+v", ack)
 	}
 
+	// create "app" stream on A, which are to be synced to B
+	appStreamA := generateRandomString() + "_app"
+	{
+		jsA, err := syncA.js.Connect(ctx)
+		assert.NoError(t, err)
+
+		_, err = jsA.CreateStream(ctx, jetstream.StreamConfig{
+			Name:        appStreamA,
+			Description: "Stream for app messages",
+			Subjects:    []string{appStreamA + ".*"}})
+		assert.NoError(t, err)
+		t.Logf("created app stream on A: %s", appStreamA)
+	}
+
+	// create "app" stream on B, which are to be synced from A
+	appStreamB := generateRandomString() + "_app"
+	{
+		jsB, err := syncB.js.Connect(ctx)
+		assert.NoError(t, err)
+
+		_, err = jsB.CreateStream(ctx, jetstream.StreamConfig{
+			Name:        appStreamB,
+			Description: "Stream for app messages. Sync'ed from A",
+			Subjects:    []string{appStreamB + ".*"}})
+		assert.NoError(t, err)
+		t.Logf("created app stream on B: %s", appStreamB)
+	}
+
+	// publish Subscription request to sync the "app" stream from A to B directly
+	{
+		sub := &v1.SubscribeRequest{
+			SourceDeployment: da.String(),
+			TargetDeployment: db.String(),
+			SourceStreamName: appStreamA,
+			TargetStreamName: appStreamB}
+		_, err := syncA.publishSubscribeRequest(ctx, sub)
+		assert.NoError(t, err)
+
+		_, err = syncB.publishSubscribeRequest(ctx, sub)
+		assert.NoError(t, err)
+		t.Logf("requested sync of app stream from A to B")
+	}
+
+	// publish messages to the "app" stream on A. Use http GetRequest (to have a defined proto message, but different)
+	{
+		req := &rh.GetRequest{Url: "http://something.com"}
+		ack, err := syncA.js.PublishProto(ctx, appStreamA+".something", req, jetstream.WithExpectStream(appStreamA))
+		assert.NoError(t, err)
+		t.Logf("published http request to %s at A", ack.Stream)
+	}
+
+	// wait for messages to be synced to B
+	{
+		js, err := syncB.js.Connect(ctx)
+		assert.NoError(t, err)
+
+		// deliver all
+		c, err := js.OrderedConsumer(ctx, appStreamB, jetstream.OrderedConsumerConfig{})
+		assert.NoError(t, err)
+
+		t.Logf("waiting for messages to be synced to B")
+		for {
+			msg, err := c.Next()
+			assert.NoError(t, err)
+
+			t.Logf("received message: %s", msg)
+		}
+	}
 }
 
 func getJSConnA() *JSConn {

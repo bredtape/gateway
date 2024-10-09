@@ -165,6 +165,7 @@ For requests:
 | Name              | Description                                                                                          | Example value                                  | Required                                                            |
 | ----------------- | ---------------------------------------------------------------------------------------------------- | ---------------------------------------------- | ------------------------------------------------------------------- |
 | grpc-path         | With fully specified package name `/<package>.<service>/<method>`. Equivalent to ":path" gRPC header | /google.pubsub.v2.PublisherService/CreateTopic | yes                                                                 |
+| content-type      | Name of the encoding used. From the gRPC protocol spec                                               | application/grpc+proto, application/grpc+json  | yes                                                                 |
 | grpc-message-type | Fully qualified proto message name                                                                   | google.rpc.Status                              | yes                                                                 |
 | grpc-timeout      | Timeout after which the request may discarded/ignored. See gRPC protocol spec.                       | 5S (5 second)                                  | should be set. Services and Gateways may overrule the timeout value |
 

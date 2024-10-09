@@ -41,16 +41,14 @@ func TestFileIO(t *testing.T) {
 	assert.NoError(t, err)
 
 	msg1 := &v1.Msg{
-		Subject:                "x.y.z",
-		Data:                   []byte("123"),
-		SourceSequence:         2,
-		PreviousSourceSequence: 0,
-		PublishTimestamp:       5}
+		Subject:          "x.y.z",
+		Data:             []byte("123"),
+		SourceSequence:   2,
+		PublishTimestamp: 5}
 	batch1 := &v1.MessageExchange{
 		Messages: []*v1.MsgBatch{
 			{
 				SourceStreamName: "stream1",
-				SubjectFilters:   nil,
 				Messages:         []*v1.Msg{msg1}}}}
 
 	// send batch from A to B
@@ -89,16 +87,14 @@ func TestFileIOWatchAfterWrite(t *testing.T) {
 	assert.NoError(t, err)
 
 	msg1 := &v1.Msg{
-		Subject:                "x.y.z",
-		Data:                   []byte("123"),
-		SourceSequence:         2,
-		PreviousSourceSequence: 0,
-		PublishTimestamp:       5}
+		Subject:          "x.y.z",
+		Data:             []byte("123"),
+		SourceSequence:   2,
+		PublishTimestamp: 5}
 	batch1 := &v1.MessageExchange{
 		Messages: []*v1.MsgBatch{
 			{
 				SourceStreamName: "stream1",
-				SubjectFilters:   nil,
 				Messages:         []*v1.Msg{msg1}}}}
 
 	// send batch from A to B

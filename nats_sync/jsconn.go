@@ -7,6 +7,7 @@ import (
 	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
 	"github.com/pkg/errors"
+	"google.golang.org/protobuf/proto"
 )
 
 type JSConfig struct {
@@ -91,4 +92,30 @@ func (c *JSConn) Connect(ctx context.Context) (jetstream.JetStream, error) {
 		c.js = &js
 	}
 	return *c.js, nil
+}
+
+func (c *JSConn) PublishProto(ctx context.Context, subject string, m proto.Message, opts ...jetstream.PublishOpt) (*jetstream.PubAck, error) {
+	js, err := c.Connect(ctx)
+	if err != nil {
+		return nil, errors.Wrap(err, "failed to connect to nats")
+	}
+
+	data, err := proto.Marshal(m)
+	if err != nil {
+		return nil, errors.Wrap(err, "failed to marshal proto message")
+	}
+
+	msg := &nats.Msg{
+		Subject: subject,
+		Header: map[string][]string{
+			"content-type":      {contentTypeProto},
+			"grpc-message-type": {string(m.ProtoReflect().Descriptor().FullName())}},
+		Data: data}
+
+	ack, err := js.PublishMsg(ctx, msg, opts...)
+	if err != nil {
+		return nil, errors.Wrap(err, "failed to publish message")
+	}
+
+	return ack, nil
 }

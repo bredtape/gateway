@@ -1,0 +1,27 @@
+syntax = "proto3";
+
+package com.github.bredtape.gateway.remote_http.v1;
+
+option go_package = "github.com/bredtape/gateway/remote_http/v1";
+
+service RemoteHttpService {
+    rpc Get(GetRequest) returns (GetResponse);
+}
+
+message GetRequest {
+    // url including query parameters
+    string url = 1;
+
+    // headers to send with the request
+    // separate multiple values with ,
+    map<string, string> headers = 2;
+}
+
+message GetResponse {
+    uint32 status_code = 1;
+    map<string, string> headers = 2;
+    string body = 3;
+
+    double start_request_time = 4;
+    double end_request_time = 5;
+}
