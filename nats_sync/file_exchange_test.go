@@ -45,8 +45,8 @@ func TestFileIO(t *testing.T) {
 		Data:             []byte("123"),
 		SourceSequence:   2,
 		PublishTimestamp: 5}
-	batch1 := &v1.MessageExchange{
-		Messages: []*v1.MsgBatch{
+	batch1 := &v1.MessageBatch{
+		ListOfMessages: []*v1.Msgs{
 			{
 				SourceStreamName: "stream1",
 				Messages:         []*v1.Msg{msg1}}}}
@@ -65,7 +65,7 @@ func TestFileIO(t *testing.T) {
 			assert.FailNow(t, "B closed result channel")
 		}
 
-		assert.Len(t, msg.Messages, 1)
+		assert.Len(t, msg.ListOfMessages, 1)
 	}
 }
 
@@ -91,8 +91,8 @@ func TestFileIOWatchAfterWrite(t *testing.T) {
 		Data:             []byte("123"),
 		SourceSequence:   2,
 		PublishTimestamp: 5}
-	batch1 := &v1.MessageExchange{
-		Messages: []*v1.MsgBatch{
+	batch1 := &v1.MessageBatch{
+		ListOfMessages: []*v1.Msgs{
 			{
 				SourceStreamName: "stream1",
 				Messages:         []*v1.Msg{msg1}}}}
@@ -115,7 +115,7 @@ func TestFileIOWatchAfterWrite(t *testing.T) {
 			assert.FailNow(t, "B closed result channel")
 		}
 
-		assert.Len(t, msg.Messages, 1)
+		assert.Len(t, msg.ListOfMessages, 1)
 	}
 }
 

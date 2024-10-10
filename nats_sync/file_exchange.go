@@ -89,7 +89,7 @@ func NewFileExchange(c FileExchangeConfig) (*FileExchange, error) {
 // watch for messages in the incoming directory.
 // The files will be deleted after the content has been read.
 // Do not assume any order
-func (ex *FileExchange) StartReceiving(ctx context.Context) (<-chan *v1.MessageExchange, error) {
+func (ex *FileExchange) StartReceiving(ctx context.Context) (<-chan *v1.MessageBatch, error) {
 	log := slog.With("incomingDirectory", ex.inDir)
 
 	// Create new watcher.
@@ -97,7 +97,7 @@ func (ex *FileExchange) StartReceiving(ctx context.Context) (<-chan *v1.MessageE
 	if err != nil {
 		return nil, errors.Wrap(err, "failed to start fsnotify watcher")
 	}
-	resultCh := make(chan *v1.MessageExchange, channelCapacity)
+	resultCh := make(chan *v1.MessageBatch, channelCapacity)
 
 	pollingResult := startPollDirectory(ctx, ex.startDelay, ex.interval, ex.retry, ex.inDir)
 
@@ -173,7 +173,7 @@ func (ex *FileExchange) StartReceiving(ctx context.Context) (<-chan *v1.MessageE
 // write message exhange to underlying file system
 // The message will be written with a . prefix first, then renamed
 // File name will be <zero padded counter, 9 digits>_<hash>.me
-func (ex *FileExchange) Write(_ context.Context, batch *v1.MessageExchange) error {
+func (ex *FileExchange) Write(_ context.Context, batch *v1.MessageBatch) error {
 	log := slog.With("outDir", ex.outDir)
 	data, err := proto.Marshal(batch)
 	if err != nil {
@@ -205,7 +205,7 @@ func (ex *FileExchange) Write(_ context.Context, batch *v1.MessageExchange) erro
 // consume message from file name (read and immediately delete).
 // Verifies hash matches content
 // Returns nil message if filename is not relevant
-func (ex *FileExchange) consumeFile(filename string) (*v1.MessageExchange, error) {
+func (ex *FileExchange) consumeFile(filename string) (*v1.MessageBatch, error) {
 	if !isRelevantFile(filename) {
 		return nil, nil
 	}
@@ -225,7 +225,7 @@ func (ex *FileExchange) consumeFile(filename string) (*v1.MessageExchange, error
 		return nil, errors.Wrap(err, "failed to verify hash")
 	}
 
-	var msg v1.MessageExchange
+	var msg v1.MessageBatch
 	err = proto.Unmarshal(data, &msg)
 	if err != nil {
 		return nil, errors.Wrap(err, "failed to unmarshal message")

@@ -44,10 +44,10 @@ func (c HTTPExchangeConfig) Validate() error {
 type HTTPExchange struct {
 }
 
-func (ex *HTTPExchange) StartReceiving(ctx context.Context) (<-chan *v1.MessageExchange, error) {
+func (ex *HTTPExchange) StartReceiving(ctx context.Context) (<-chan *v1.MessageBatch, error) {
 	return nil, errors.New("not implemented")
 }
 
-func (ex *HTTPExchange) Write(ctx context.Context, msg *v1.MessageExchange) error {
+func (ex *HTTPExchange) Write(ctx context.Context, msg *v1.MessageBatch) error {
 	return errors.New("not implemented")
 }

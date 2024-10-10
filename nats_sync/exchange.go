@@ -7,6 +7,6 @@ import (
 )
 
 type Exchange interface {
-	StartReceiving(context.Context) (<-chan *v1.MessageExchange, error)
-	Write(context.Context, *v1.MessageExchange) error
+	StartReceiving(context.Context) (<-chan *v1.MessageBatch, error)
+	Write(context.Context, *v1.MessageBatch) error
 }

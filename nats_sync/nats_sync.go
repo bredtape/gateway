@@ -151,7 +151,7 @@ func StartNatsSync(ctx context.Context, js *JSConn, config NatsSyncConfig) (*Nat
 
 func (ns *NatsSync) Start(ctx context.Context) error {
 
-	incoming := make(chan *v1.MessageExchange)
+	incoming := make(chan *v1.MessageBatch)
 
 	for d, e := range ns.config.Exchanges {
 		ch, err := e.StartReceiving(ctx)
@@ -192,7 +192,7 @@ func (ns *NatsSync) Start(ctx context.Context) error {
 	return nil
 }
 
-func (ns *NatsSync) handleIncomingMessage(ctx context.Context, msg *v1.MessageExchange) error {
+func (ns *NatsSync) handleIncomingMessage(ctx context.Context, msg *v1.MessageBatch) error {
 	log := slog.With("operation", "handleIncomingMessage", "deployment", ns.config.Deployment)
 	log.Debug("received message", "msg", msg)
 

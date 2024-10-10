@@ -1,13 +1,10 @@
 package nats_sync
 
 import (
-	"fmt"
-	"slices"
 	"time"
 
 	"github.com/bredtape/gateway"
 	v1 "github.com/bredtape/gateway/nats_sync/v1"
-	"github.com/bredtape/set"
 	"github.com/google/uuid"
 	"github.com/nats-io/nats.go/jetstream"
 	"github.com/pkg/errors"
@@ -21,8 +18,9 @@ func init() {
 var (
 	ErrNoSubscription = errors.New("no subscription")
 	// slow consumer error, when the target has too many messages queued
-	ErrSlowConsumer            = errors.New("slow consumer")
-	ErrAckWindowOutsidePending = errors.New("ack window outside pending")
+	ErrSlowConsumer         = errors.New("slow consumer")
+	ErrSourceSequenceBroken = errors.New("source sequence broken. Subscription must be restarted")
+	ErrBackoff              = errors.New("cannot accept new messages, pending messages must be dispatched first")
 )
 
 // to manage internal state of sync.
@@ -30,31 +28,40 @@ type state struct {
 	deployment gateway.Deployment
 	cs         map[gateway.Deployment]CommunicationSettings
 	// original subscription, remember if subscription is reset
-	originalSubscription map[SubscriptionKey]sourceSubscription
+	subscription map[SubscriptionKey]SourceSubscription
 
 	// outstanding acks
-	ackWindows map[SubscriptionKey]AckWindow
+	sourceAckWindows map[SubscriptionKey]*SourcePendingWindow
 
-	InfoRequests map[string]StreamInfoRequest
-	PubRequests  map[string]PublishRequest
+	// messages to be sent to remote deployment.
+	// Only present if there are messages to be sent for that subscription
+	sourceOutgoing map[gateway.Deployment]map[SubscriptionKey][]*v1.Msg
+
+	//InfoRequests map[string]StreamInfoRequest
+	//PubRequests  map[string]PublishRequest
 
 	// requested local subscription
-	LocalSubscriptions map[SubscriptionKey]sourceSubscription
-
-	Outgoing map[SubscriptionKey]*v1.MsgBatch
+	SourceLocalSubscriptions map[SubscriptionKey]SourceSubscription
 }
 
 func newState(d gateway.Deployment, cs map[gateway.Deployment]CommunicationSettings) *state {
 	return &state{
-		deployment:           d,
-		cs:                   cs,
-		originalSubscription: make(map[SubscriptionKey]sourceSubscription),
-		ackWindows:           make(map[SubscriptionKey]AckWindow),
-		// public fields
-		InfoRequests:       make(map[string]StreamInfoRequest),
-		PubRequests:        make(map[string]PublishRequest),
-		LocalSubscriptions: make(map[SubscriptionKey]sourceSubscription),
-		Outgoing:           make(map[SubscriptionKey]*v1.MsgBatch)}
+		deployment: d,
+		cs:         cs,
+		// subscription at either source or target
+		subscription: make(map[SubscriptionKey]SourceSubscription),
+
+		// -- fields for source --
+
+		sourceAckWindows: make(map[SubscriptionKey]*SourcePendingWindow),
+		sourceOutgoing:   make(map[gateway.Deployment]map[SubscriptionKey][]*v1.Msg),
+
+		// local subscription at source
+		SourceLocalSubscriptions: make(map[SubscriptionKey]SourceSubscription),
+
+		// -- fields for target --
+
+	}
 }
 
 // Notes:
@@ -73,154 +80,23 @@ func (s *state) RegisterSubscription(req *v1.SubscribeRequest) error {
 	}
 
 	sub := toSourceSubscription(
-		req.GetTargetDeployment(),
+		gateway.Deployment(req.GetTargetDeployment()),
 		req.GetSourceStreamName(),
 		req.GetConsumerConfig(), req.GetFilterSubjects())
 	// keep the original subscription
-	s.originalSubscription[sub.SubscriptionKey] = sub
+	s.subscription[sub.SubscriptionKey] = sub
 
 	if isSource {
 		subLocal := sub
 		// be optimistic that the target has the most recent message
 		subLocal.DeliverPolicy = jetstream.DeliverLastPolicy
-		s.LocalSubscriptions[sub.SubscriptionKey] = subLocal
+		s.SourceLocalSubscriptions[sub.SubscriptionKey] = subLocal
 	}
 
 	return nil
 }
 
 func (s *state) UnregisterSubscription(req *v1.UnsubscribeRequest) error {
-	return nil
-}
-
-// handle both incoming messages and ack's
-func (s *state) HandleIncoming(t time.Time, me *v1.MessageExchange) error {
-	if me.ToDeployment != s.deployment.String() {
-		return errors.New("not for this deployment")
-	}
-
-	// for _, ack := range me.Acknowledges {
-
-	// }
-
-	return nil
-}
-
-// handle incoming ack from target deployment
-// ack may be out or order (so the sequence from/to are out of order)
-func (s *state) HandleTargetAck(t time.Time, targetDeployment gateway.Deployment, ack *v1.Acknowledge) error {
-	key := SubscriptionKey{
-		TargetDeployment: targetDeployment,
-		SourceStreamName: ack.GetSourceStreamName()}
-
-	if _, exists := s.originalSubscription[key]; !exists {
-		return errors.Wrapf(ErrNoSubscription, "no subscription for key %v", key)
-	}
-
-	if ack.GetIsNak() {
-		return errors.New("not implemented")
-	}
-
-	w, exists := s.ackWindows[key]
-	if !exists {
-		// no outstanding acks, ignore
-		return nil
-	}
-
-	r0 := w.Pending
-
-	r1 := RangeInclusive[uint64]{
-		From: ack.GetSourceSequenceFrom(),
-		To:   ack.GetSourceSequenceTo()}
-
-	// ack window is not pending, ignore
-	if !r0.Overlaps(r1) {
-		return nil
-	}
-
-	if r1.To > r0.To {
-		return errors.Wrap(ErrAckWindowOutsidePending, "ack window is AFTER pending")
-	}
-
-	if !r0.Contains(r1) {
-		return errors.New("ack window not contained in pending")
-	}
-
-	// ignore the fact that ack may be before pending From
-	if r0.From != r1.From {
-		return errors.New("expected ack window to align with pending")
-	}
-
-	if r0.To == r1.To {
-		delete(s.ackWindows, key)
-	} else {
-		w.Pending.From = r1.To
-		s.ackWindows[key] = w
-	}
-
-	return nil
-}
-
-// deliver local messages from requested subscriptions (to be sent to remote)
-func (s *state) SourceDeliverFromLocal(b *v1.MsgBatch) error {
-	key := GetSubscriptionKey(b)
-
-	_, exists := s.LocalSubscriptions[key]
-	if !exists {
-		return errors.Wrapf(ErrNoSubscription, "no subscription for key %v", key)
-	}
-
-	if out, exists := s.Outgoing[key]; exists {
-		if len(out.Messages) == 0 {
-			return fmt.Errorf("outgoing messages should not be empty (key %v)", key)
-		}
-
-		err := mergeMsgBatch(out, b)
-		if err != nil {
-			return err
-		}
-	} else {
-		s.Outgoing[key] = b
-	}
-
-	return nil
-}
-
-// mark batch as dispatched to target deployment at the specified time
-func (s *state) SourceMarkDispatched(t time.Time, b *v1.MsgBatch) error {
-	key := GetSubscriptionKey(b)
-	delete(s.Outgoing, key)
-	return nil
-}
-
-// message sequence MUST be in order.
-// Message seqeunces MUST have some overlap, e.g. the last sequence of the first batch must
-// be the same as the first sequence of the second batch.
-// If an error is returned, the first batch has not be modified
-func mergeMsgBatch(x, y *v1.MsgBatch) error {
-	if x.GetSourceStreamName() != y.GetSourceStreamName() {
-		return errors.New("source stream name mismatch")
-	}
-
-	if x.GetTargetDeployment() != y.GetTargetDeployment() {
-		return errors.New("target deployment mismatch")
-	}
-
-	seen := set.New[uint64](len(x.Messages) + len(y.Messages))
-	for _, x := range x.Messages {
-		seen.Add(x.SourceSequence)
-	}
-
-	for _, y := range y.Messages {
-		if seen.Contains(y.SourceSequence) {
-			continue
-		}
-		seen.Add(y.SourceSequence)
-		x.Messages = append(x.Messages, y)
-	}
-
-	slices.SortFunc(x.Messages, cmpMsgSequence)
-
 	return nil
 }
 
@@ -264,27 +140,6 @@ type PublishResponse struct {
 	LowestSourceSequenceReceived uint64
 }
 
-// description at source nats stream
-type sourceSubscription struct {
-	SubscriptionKey
-
-	DeliverPolicy  jetstream.DeliverPolicy
-	OptStartSeq    uint64
-	OptStartTime   time.Time
-	FilterSubjects []string
-}
-
-func toSourceSubscription(targetDeployment, sourceStream string, s *v1.ConsumerConfig, filterSubjects []string) sourceSubscription {
-	return sourceSubscription{
-		SubscriptionKey: SubscriptionKey{
-			TargetDeployment: targetDeployment,
-			SourceStreamName: sourceStream},
-		DeliverPolicy:  ToDeliverPolicy(s.GetDeliverPolicy()),
-		OptStartSeq:    s.GetOptStartSeq(),
-		OptStartTime:   fromUnixTime(s.GetOptStartTime()),
-		FilterSubjects: filterSubjects}
-}
-
 func ToDeliverPolicy(p v1.DeliverPolicy) jetstream.DeliverPolicy {
 	switch p {
 	case v1.DeliverPolicy_DELIVER_POLICY_ALL:
@@ -297,8 +152,23 @@ func ToDeliverPolicy(p v1.DeliverPolicy) jetstream.DeliverPolicy {
 		return jetstream.DeliverByStartSequencePolicy
 	case v1.DeliverPolicy_DELIVER_POLICY_BY_START_TIME:
 		return jetstream.DeliverByStartTimePolicy
-	case v1.DeliverPolicy_DELIVER_POLICY_LAST_PER_SUBJECT:
-		return jetstream.DeliverLastPerSubjectPolicy
+	default:
+		panic("unknown deliver policy")
+	}
+}
+
+func FromDeliverPolicy(p jetstream.DeliverPolicy) v1.DeliverPolicy {
+	switch p {
+	case jetstream.DeliverAllPolicy:
+		return v1.DeliverPolicy_DELIVER_POLICY_ALL
+	case jetstream.DeliverLastPolicy:
+		return v1.DeliverPolicy_DELIVER_POLICY_LAST
+	case jetstream.DeliverNewPolicy:
+		return v1.DeliverPolicy_DELIVER_POLICY_NEW
+	case jetstream.DeliverByStartSequencePolicy:
+		return v1.DeliverPolicy_DELIVER_POLICY_BY_START_SEQUENCE
+	case jetstream.DeliverByStartTimePolicy:
+		return v1.DeliverPolicy_DELIVER_POLICY_BY_START_TIME
 	default:
 		panic("unknown deliver policy")
 	}
@@ -331,17 +201,32 @@ type SubscriptionKey struct {
 	SourceStreamName string
 }
 
-func GetSubscriptionKey(b *v1.MsgBatch) SubscriptionKey {
+func GetSubscriptionKey(b *v1.Msgs) SubscriptionKey {
 	return SubscriptionKey{
 		TargetDeployment: gateway.Deployment(b.GetTargetDeployment()),
 		SourceStreamName: b.GetSourceStreamName()}
 }
 
-type AckWindow struct {
-	// from and to sequence number, both inclusive
-	Pending RangeInclusive[uint64]
+// set ID used when sending a set of messages to be acknowledged
+type SetID uuid.UUID
 
-	// number of messages in the window
-	// This is because the sequence numbers are not necessarily contiguous
-	//Count uint64
+func NewSetID() SetID {
+	id := uuid.New()
+	return SetID(id)
+}
+
+func (id SetID) String() string {
+	return uuid.UUID(id).String()
+}
+
+func (id SetID) GetBytes() []byte {
+	return id[:]
+}
+
+func NewSetIDFromBytes(x []byte) (SetID, error) {
+	u, err := uuid.FromBytes(x)
+	if err != nil {
+		return SetID{}, err
+	}
+	return SetID(u), nil
 }

@@ -143,9 +143,8 @@ enum DeliverPolicy {
 	// configured with OptStartTime in ConsumerConfig.
 	DELIVER_POLICY_BY_START_TIME = 4;
 
-	// DeliverLastPerSubjectPolicy will start the consumer with the last message
-	// for all subjects received.
-	DELIVER_POLICY_LAST_PER_SUBJECT = 5;
+	// DeliverLastPerSubjectPolicy is not implemented, because it will require
+  // the source to signal when each message per subject have been received
 }
 
 // to mirror nats Msg (https://github.com/nats-io/nats.go/blob/main/nats.go)
@@ -166,12 +165,12 @@ message Msg {
   double publish_timestamp = 6;
 }
 
-// batch of messages belonging to the same deployment, source stream and subscription
-message MsgBatch {
-  // batch id, a unique uuid per batch
+// messages belonging to the same deployment, source stream and subscription
+message Msgs {
+  // set id, a unique uuid per set of messages
   // This is needed because old irrelevant messages may be delivered, and
   // must be ignored
-  bytes batch_id = 1;
+  bytes set_id = 1;
 
   // target deployment
   string target_deployment = 2;
@@ -184,23 +183,30 @@ message MsgBatch {
 
   ConsumerConfig consumer_config = 5;
 
+  // lowest sequence number in the messages. Will be 0 if this is the first
+  // batch for the subscription (or the subscription has been restarted)
+  uint64 sequence_from = 6;
+
+  // highest sequence number in the messages (inclusive)
+  uint64 sequence_to = 7;
+
   // messages matching the stream name and subject filters.
   // Ordered by sequence. Must not be empty. May have gaps in sequence.
-  repeated Msg messages = 6;
+  repeated Msg messages = 8;
 }
 
 // acknowledge combination of stream name, subject and sequence
 message Acknowledge {
-  // batch id, matching MsgBatch
-  bytes batch_id = 1;
+  // set id, matching Msgs
+  bytes set_id = 1;
 
   string source_stream_name = 2;
 
   // source sequence number from (inclusive)
-  uint64 source_sequence_from = 3;
+  uint64 sequence_from = 3;
 
   // source seqeuence number to (inclusive)
-  uint64 source_sequence_to = 4;
+  uint64 sequence_to = 4;
 
   // to indicate not-acknowledge, in which case the subscription will be restarted.
   // If lowest_ack_sequence is set, the subscription will resume from that sequence.
@@ -212,8 +218,8 @@ message Acknowledge {
   string reason = 6;
 }
 
-// message exchange. Used for lower level exchange between deployments using other means of transport than nats
-message MessageExchange {
+// message batch. Used for lower level exchange between deployments using other means of transport than nats
+message MessageBatch {
   string to_deployment = 1;
   string from_deployment = 2;
 
@@ -223,6 +229,6 @@ message MessageExchange {
   double sent_timestamp = 3;
 
   repeated Acknowledge acknowledges = 4;
-  repeated MsgBatch messages = 5;
+  repeated Msgs list_of_messages = 5;
 }
 
