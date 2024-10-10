@@ -43,7 +43,7 @@ func TestFileIO(t *testing.T) {
 	msg1 := &v1.Msg{
 		Subject:          "x.y.z",
 		Data:             []byte("123"),
-		SourceSequence:   2,
+		Sequence:         2,
 		PublishTimestamp: 5}
 	batch1 := &v1.MessageBatch{
 		ListOfMessages: []*v1.Msgs{
@@ -89,7 +89,7 @@ func TestFileIOWatchAfterWrite(t *testing.T) {
 	msg1 := &v1.Msg{
 		Subject:          "x.y.z",
 		Data:             []byte("123"),
-		SourceSequence:   2,
+		Sequence:         2,
 		PublishTimestamp: 5}
 	batch1 := &v1.MessageBatch{
 		ListOfMessages: []*v1.Msgs{

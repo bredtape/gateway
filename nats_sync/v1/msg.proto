@@ -159,7 +159,7 @@ message Msg {
   // metadata fields
 
   // source sequence
-  uint64 source_sequence = 4;
+  uint64 sequence = 4;
 
   // when the Msg was published to the source. In seconds since Unix epoch
   double publish_timestamp = 6;
@@ -172,27 +172,27 @@ message Msgs {
   // must be ignored
   bytes set_id = 1;
 
+  // source deployment
+  string source_deployment = 2;
+
   // target deployment
-  string target_deployment = 2;
+  string target_deployment = 3;
 
   // source stream name
-  string source_stream_name = 3;
+  string source_stream_name = 4;
 
   // subscription filters used at the source for this stream.
-  repeated string filter_subjects = 4;
+  repeated string filter_subjects = 5;
 
-  ConsumerConfig consumer_config = 5;
+  ConsumerConfig consumer_config = 6;
 
-  // lowest sequence number in the messages. Will be 0 if this is the first
+  // the sequence before this. Will be 0 if this is the first
   // batch for the subscription (or the subscription has been restarted)
-  uint64 sequence_from = 6;
-
-  // highest sequence number in the messages (inclusive)
-  uint64 sequence_to = 7;
+  uint64 last_sequence = 7;
 
   // messages matching the stream name and subject filters.
-  // Ordered by sequence. Must not be empty. May have gaps in sequence.
-  repeated Msg messages = 8;
+  // Ordered by sequence. May be empty. May have gaps in sequence.
+  repeated Msg messages = 9;
 }
 
 // acknowledge combination of stream name, subject and sequence
