@@ -170,7 +170,7 @@ func TestNatsSyncLowLevelSync(t *testing.T) {
 
 	// publish Subscription request to sync the "app" stream from A to B directly
 	{
-		sub := &v1.SubscribeRequest{
+		sub := &v1.StartSyncRequest{
 			SourceDeployment: da.String(),
 			TargetDeployment: db.String(),
 			SourceStreamName: appStreamA,

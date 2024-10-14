@@ -9,6 +9,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/nats-io/nats.go/jetstream"
 	"github.com/pkg/errors"
+	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
 func init() {
@@ -24,6 +25,31 @@ var (
 	ErrBackoff              = errors.New("cannot accept new messages, pending messages must be dispatched first")
 )
 
+/* TODO:
+guarantee that messages are delivered in order
+[ ] at target, send nak if sequence range is before last sequence persisted (to fast forward source)
+[ ] at target, send nak if sequence range is after last sequence (to restart source subscription)
+[ ] at source, handle nak by restarting subscription
+[ ] at target, do not accept batches with overlapping sequences (because it is impossible to keep 'Count')
+[ ] at source, do not accept ack of batches with overlapping sequences (because it is impossible to keep 'Count')
+
+backoff:
+[x] at source, do not accept new messages if there are too many pending messages (MaxPendingAcksPrSubscription)
+[x] at source, accept a partial batch of messages if limit has not been reached, and then backoff
+[x] at target, do not accept incoming messages if there are too many pending messages (MaxPendingIncomingMessagesPrSubscription)
+
+ack timeout:
+[ ] at source, if ack is not received within AckTimeout, resend Msgs again (with the same SetID)
+
+heartbeat:
+[ ] at source, add empty Msgs to the batch if no messages have been sent for a subscription
+  within HeartbeatIntervalPrSubscription
+[ ] at target, accept empty Msgs and send Acknowledge
+
+flush:
+[ ] at source, with pending messages/acks pr target, indicate the earliest time messages/acks should be sent to the target
+*/
+
 // to manage internal state of sync.
 type state struct {
 	deployment gateway.Deployment
@@ -33,7 +59,7 @@ type state struct {
 	// outstanding acks
 	sourceAckWindows map[SourceSubscriptionKey]*SourcePendingWindow
 
-	// outgoing messages per target deployment
+	// outgoing messages buffered per target deployment (not send yet)
 	// Only present if there are messages to be sent for that subscription
 	sourceOutgoing map[gateway.Deployment]map[SourceSubscriptionKey][]*v1.Msg
 
@@ -58,8 +84,8 @@ type state struct {
 	targetSubscription map[TargetSubscriptionKey]TargetSubscription
 }
 
-func newState(d gateway.Deployment, cs map[gateway.Deployment]CommunicationSettings) *state {
-	return &state{
+func newState(d gateway.Deployment, cs map[gateway.Deployment]CommunicationSettings) (*state, error) {
+	s := &state{
 		deployment: d,
 		cs:         cs,
 		// subscription at either source or target
@@ -70,6 +96,8 @@ func newState(d gateway.Deployment, cs map[gateway.Deployment]CommunicationSetti
 		targetCommit:               make(map[TargetSubscriptionKey]*TargetCommitWindow),
 		TargetIncoming:             make(map[TargetSubscriptionKey][]*v1.Msgs),
 		targetSubscription:         make(map[TargetSubscriptionKey]TargetSubscription)}
+
+	return s, s.Validate()
 }
 
 // Notes:
@@ -79,7 +107,7 @@ func newState(d gateway.Deployment, cs map[gateway.Deployment]CommunicationSetti
 // register subscription. If this deployment matches the source a LocalSubscriptions entry
 // will be present. If this deployment matches the target, messages are expected
 // to arrive and will then be published to the (local) target stream.
-func (s *state) RegisterSubscription(req *v1.SubscribeRequest) error {
+func (s *state) RegisterSubscription(req *v1.StartSyncRequest) error {
 	isSource := req.GetSourceDeployment() == s.deployment.String()
 	isTarget := req.GetTargetDeployment() == s.deployment.String()
 
@@ -108,8 +136,10 @@ func (s *state) RegisterSubscription(req *v1.SubscribeRequest) error {
 			TargetDeployment:      gateway.Deployment(req.GetTargetDeployment()),
 			DeliverPolicy:         ToDeliverPolicy(req.GetConsumerConfig().GetDeliverPolicy()),
 			OptStartSeq:           req.GetConsumerConfig().GetOptStartSeq(),
-			OptStartTime:          fromUnixTime(req.GetConsumerConfig().GetOptStartTime()),
 			FilterSubjects:        req.GetFilterSubjects()}
+		if sub.DeliverPolicy == jetstream.DeliverByStartTimePolicy {
+			sub.OptStartTime = req.GetConsumerConfig().GetOptStartTime().AsTime()
+		}
 
 		s.targetSubscription[key] = sub
 		return nil
@@ -119,17 +149,19 @@ func (s *state) RegisterSubscription(req *v1.SubscribeRequest) error {
 
 }
 
-func (s *state) UnregisterSubscription(req *v1.UnsubscribeRequest) error {
+func (s *state) UnregisterSubscription(req *v1.StopSyncRequest) error {
 	return errors.New("not implemented")
 }
 
 // create batch of messages and acks queued for 'to' deployment. Returns nil if no messages are queued
-// This will not delete the messages from the outgoing queue (you must call SourceMarkDispatched)
+// This will not delete the messages from the outgoing queue (you must call MarkDispatched)
+// You should call MarkDispatched after sending the batch to the target deployment.
+// If you call CreateMessageBatch again before a succesful MarkDispatched, the same messages will be included (and more, if some messages have been delivered via SourceDeliverFromLocal)
 func (s *state) CreateMessageBatch(t time.Time, to gateway.Deployment) (*v1.MessageBatch, error) {
 	m := &v1.MessageBatch{
 		ToDeployment:   to.String(),
 		FromDeployment: s.deployment.String(),
-		SentTimestamp:  toUnixTime(t)}
+		SentTimestamp:  timestamppb.New(t.UTC())}
 
 	for key := range s.sourceOutgoing[to] {
 		b := s.packMessages(key)
@@ -139,7 +171,7 @@ func (s *state) CreateMessageBatch(t time.Time, to gateway.Deployment) (*v1.Mess
 	}
 
 	for _, w := range s.targetCommit {
-		for _, ack := range w.PendingAcks[to] {
+		for _, ack := range w.PendingAcks {
 			m.Acknowledges = append(m.Acknowledges, ack)
 		}
 	}
@@ -148,6 +180,22 @@ func (s *state) CreateMessageBatch(t time.Time, to gateway.Deployment) (*v1.Mess
 		return nil, nil
 	}
 	return m, nil
+}
+
+// pending stats for target deployment
+// returns [number of messages, number of acks]
+func (s *state) PendingStats(to gateway.Deployment) []int {
+	var nm, na int
+
+	for key := range s.sourceOutgoing[to] {
+		nm += len(s.sourceOutgoing[to][key])
+	}
+
+	for _, w := range s.targetCommit {
+		na += len(w.PendingAcks)
+	}
+
+	return []int{nm, na}
 }
 
 type DispatchReport struct {
@@ -169,17 +217,12 @@ func (s *state) MarkDispatched(b *v1.MessageBatch) DispatchReport {
 
 	d := gateway.Deployment(b.GetToDeployment())
 
+	// messages
 	msgsErrs := make(map[SourceSubscriptionKey]error)
 	for _, msgs := range b.ListOfMessages {
 		key := SourceSubscriptionKey{
 			TargetDeployment: d,
 			SourceStreamName: msgs.GetSourceStreamName()}
-
-		setID, err := NewSetIDFromBytes(msgs.GetSetId())
-		if err != nil {
-			msgsErrs[key] = errors.Wrap(err, "failed to parse batch id")
-			continue
-		}
 
 		if _, exists := s.sourceAckWindows[key]; !exists {
 			s.sourceAckWindows[key] = &SourcePendingWindow{}
@@ -187,17 +230,18 @@ func (s *state) MarkDispatched(b *v1.MessageBatch) DispatchReport {
 		w := s.sourceAckWindows[key]
 
 		ack := SourcePendingAck{
-			SetID:         setID,
-			SentTimestamp: fromUnixTime(b.GetSentTimestamp()),
+			SetID:         SetID(msgs.GetSetId()),
+			SentTimestamp: b.GetSentTimestamp().AsTime(),
 			SequenceRange: RangeInclusive[uint64]{
 				From: msgs.GetLastSequence(),
-				To:   msgs.GetLastSequence()}}
+				To:   msgs.GetLastSequence()},
+			Messages: msgs.GetMessages()}
 
 		if len(msgs.GetMessages()) > 0 {
 			ack.SequenceRange.To = msgs.GetMessages()[len(msgs.GetMessages())-1].GetSequence()
 		}
 
-		err = w.MarkDispatched(ack)
+		err := w.MarkDispatched(ack)
 		if err != nil {
 			msgsErrs[key] = errors.Wrap(err, "failed to mark dispatched")
 		}
@@ -218,12 +262,7 @@ func (s *state) MarkDispatched(b *v1.MessageBatch) DispatchReport {
 			continue
 		}
 
-		id, err := NewSetIDFromBytes(ack.GetSetId())
-		if err != nil {
-			ackErrs[key] = errors.Wrap(err, "failed to parse set id")
-			continue
-		}
-		delete(w.PendingAcks[key.SourceDeployment], id)
+		delete(w.PendingAcks, SetID(ack.GetSetId()))
 	}
 
 	return DispatchReport{
@@ -339,25 +378,29 @@ func GetSubscriptionKey(b *v1.Msgs) SourceSubscriptionKey {
 }
 
 // set ID used when sending a set of messages to be acknowledged
-type SetID uuid.UUID
+type SetID string
 
 func NewSetID() SetID {
-	id := uuid.New()
-	return SetID(id)
+	return SetID(uuid.New().String())
 }
 
 func (id SetID) String() string {
-	return uuid.UUID(id).String()
+	return string(id)
 }
 
-func (id SetID) GetBytes() []byte {
-	return id[:]
-}
-
-func NewSetIDFromBytes(x []byte) (SetID, error) {
-	u, err := uuid.FromBytes(x)
-	if err != nil {
-		return SetID{}, err
+func (s *state) Validate() error {
+	if _, exists := s.cs[s.deployment]; exists {
+		return errors.New("must only have communication settings for targets, not self")
 	}
-	return SetID(u), nil
+
+	if len(s.cs) == 0 {
+		return errors.New("communication settings empty")
+	}
+
+	for d, cs := range s.cs {
+		if ve := cs.Validate(); ve != nil {
+			return errors.Wrapf(ve, "invalid communication settings for deployment %s", d)
+		}
+	}
+	return nil
 }

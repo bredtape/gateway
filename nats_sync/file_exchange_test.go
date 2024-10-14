@@ -9,6 +9,7 @@ import (
 
 	v1 "github.com/bredtape/gateway/nats_sync/v1"
 	"github.com/stretchr/testify/assert"
+	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
 func TestFileIODirShouldExists(t *testing.T) {
@@ -44,7 +45,7 @@ func TestFileIO(t *testing.T) {
 		Subject:          "x.y.z",
 		Data:             []byte("123"),
 		Sequence:         2,
-		PublishTimestamp: 5}
+		PublishTimestamp: timestamppb.New(time.Date(2021, 1, 1, 0, 0, 0, 0, time.UTC))}
 	batch1 := &v1.MessageBatch{
 		ListOfMessages: []*v1.Msgs{
 			{
@@ -90,7 +91,7 @@ func TestFileIOWatchAfterWrite(t *testing.T) {
 		Subject:          "x.y.z",
 		Data:             []byte("123"),
 		Sequence:         2,
-		PublishTimestamp: 5}
+		PublishTimestamp: timestamppb.New(time.Date(2021, 1, 1, 0, 0, 0, 0, time.UTC))}
 	batch1 := &v1.MessageBatch{
 		ListOfMessages: []*v1.Msgs{
 			{

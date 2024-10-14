@@ -4,6 +4,7 @@ import (
 	"slices"
 	"time"
 
+	v1 "github.com/bredtape/gateway/nats_sync/v1"
 	"github.com/pkg/errors"
 )
 
@@ -94,6 +95,7 @@ type SourcePendingAck struct {
 	SetID         SetID
 	SentTimestamp time.Time
 	SequenceRange RangeInclusive[uint64]
+	Messages      []*v1.Msg
 }
 
 // compare PendingAck by sequence range

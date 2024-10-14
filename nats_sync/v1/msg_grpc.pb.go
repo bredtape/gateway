@@ -2,7 +2,7 @@
 // versions:
 // - protoc-gen-go-grpc v1.5.1
 // - protoc             v3.13.0
-// source: nats_sync/v1/msg.proto
+// source: msg.proto
 
 package v1
 
@@ -19,8 +19,8 @@ import (
 const _ = grpc.SupportPackageIsVersion9
 
 const (
-	NatsSyncService_Subscribe_FullMethodName   = "/com.github.bredtape.gateway.nats_transfer.v1.NatsSyncService/Subscribe"
-	NatsSyncService_Unsubscribe_FullMethodName = "/com.github.bredtape.gateway.nats_transfer.v1.NatsSyncService/Unsubscribe"
+	NatsSyncService_StartSync_FullMethodName = "/com.github.bredtape.gateway.nats_sync.v1.NatsSyncService/StartSync"
+	NatsSyncService_StopSync_FullMethodName  = "/com.github.bredtape.gateway.nats_sync.v1.NatsSyncService/StopSync"
 )
 
 // NatsSyncServiceClient is the client API for NatsSyncService service.
@@ -28,14 +28,17 @@ const (
 // For semantics around ctx use and closing/ending streaming RPCs, please refer to https://pkg.go.dev/google.golang.org/grpc/?tab=doc#ClientConn.NewStream.
 //
 // nats sync service, to initiate sync of a stream from one deployment to another.
-// To bootstrap the NatsSyncService itself, all deployments must have the Subscribe requests published to their designated nats stream for this service (which matches either the source or target deployment)
+// To bootstrap the NatsSyncService itself, all deployments must have the
+// StartSync requests published to their designated nats stream for this service
+// (which matches either the source or target deployment)
 type NatsSyncServiceClient interface {
-	// Subscribe to a stream
-	// Only one subscription can be active pr combination of source_deployment, source_stream_name and target_deployment
-	// You cannot change a subscription but must send a UnsubscribeRequest, then a new SubscribeRequest
-	Subscribe(ctx context.Context, in *SubscribeRequest, opts ...grpc.CallOption) (*SubscribeResponse, error)
-	// Unsubscribe from a stream. See note on Subscribe
-	Unsubscribe(ctx context.Context, in *UnsubscribeRequest, opts ...grpc.CallOption) (*UnsubscribeResponse, error)
+	// Start sync'ing a stream from one deployment to another.
+	// Only one sync operation can be active pr combination of source_deployment, source_stream_name and target_deployment
+	// You cannot change the parameters of the sync operation,  but must send a StopSync,
+	// then a new StartSync
+	StartSync(ctx context.Context, in *StartSyncRequest, opts ...grpc.CallOption) (*StartSyncResponse, error)
+	// Stop sync of a stream. See note on StartSync
+	StopSync(ctx context.Context, in *StopSyncRequest, opts ...grpc.CallOption) (*StopSyncResponse, error)
 }
 
 type natsSyncServiceClient struct {
@@ -46,20 +49,20 @@ func NewNatsSyncServiceClient(cc grpc.ClientConnInterface) NatsSyncServiceClient
 	return &natsSyncServiceClient{cc}
 }
 
-func (c *natsSyncServiceClient) Subscribe(ctx context.Context, in *SubscribeRequest, opts ...grpc.CallOption) (*SubscribeResponse, error) {
+func (c *natsSyncServiceClient) StartSync(ctx context.Context, in *StartSyncRequest, opts ...grpc.CallOption) (*StartSyncResponse, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	out := new(SubscribeResponse)
-	err := c.cc.Invoke(ctx, NatsSyncService_Subscribe_FullMethodName, in, out, cOpts...)
+	out := new(StartSyncResponse)
+	err := c.cc.Invoke(ctx, NatsSyncService_StartSync_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
 	}
 	return out, nil
 }
 
-func (c *natsSyncServiceClient) Unsubscribe(ctx context.Context, in *UnsubscribeRequest, opts ...grpc.CallOption) (*UnsubscribeResponse, error) {
+func (c *natsSyncServiceClient) StopSync(ctx context.Context, in *StopSyncRequest, opts ...grpc.CallOption) (*StopSyncResponse, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	out := new(UnsubscribeResponse)
-	err := c.cc.Invoke(ctx, NatsSyncService_Unsubscribe_FullMethodName, in, out, cOpts...)
+	out := new(StopSyncResponse)
+	err := c.cc.Invoke(ctx, NatsSyncService_StopSync_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -71,14 +74,17 @@ func (c *natsSyncServiceClient) Unsubscribe(ctx context.Context, in *Unsubscribe
 // for forward compatibility.
 //
 // nats sync service, to initiate sync of a stream from one deployment to another.
-// To bootstrap the NatsSyncService itself, all deployments must have the Subscribe requests published to their designated nats stream for this service (which matches either the source or target deployment)
+// To bootstrap the NatsSyncService itself, all deployments must have the
+// StartSync requests published to their designated nats stream for this service
+// (which matches either the source or target deployment)
 type NatsSyncServiceServer interface {
-	// Subscribe to a stream
-	// Only one subscription can be active pr combination of source_deployment, source_stream_name and target_deployment
-	// You cannot change a subscription but must send a UnsubscribeRequest, then a new SubscribeRequest
-	Subscribe(context.Context, *SubscribeRequest) (*SubscribeResponse, error)
-	// Unsubscribe from a stream. See note on Subscribe
-	Unsubscribe(context.Context, *UnsubscribeRequest) (*UnsubscribeResponse, error)
+	// Start sync'ing a stream from one deployment to another.
+	// Only one sync operation can be active pr combination of source_deployment, source_stream_name and target_deployment
+	// You cannot change the parameters of the sync operation,  but must send a StopSync,
+	// then a new StartSync
+	StartSync(context.Context, *StartSyncRequest) (*StartSyncResponse, error)
+	// Stop sync of a stream. See note on StartSync
+	StopSync(context.Context, *StopSyncRequest) (*StopSyncResponse, error)
 	mustEmbedUnimplementedNatsSyncServiceServer()
 }
 
@@ -89,11 +95,11 @@ type NatsSyncServiceServer interface {
 // pointer dereference when methods are called.
 type UnimplementedNatsSyncServiceServer struct{}
 
-func (UnimplementedNatsSyncServiceServer) Subscribe(context.Context, *SubscribeRequest) (*SubscribeResponse, error) {
-	return nil, status.Errorf(codes.Unimplemented, "method Subscribe not implemented")
+func (UnimplementedNatsSyncServiceServer) StartSync(context.Context, *StartSyncRequest) (*StartSyncResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method StartSync not implemented")
 }
-func (UnimplementedNatsSyncServiceServer) Unsubscribe(context.Context, *UnsubscribeRequest) (*UnsubscribeResponse, error) {
-	return nil, status.Errorf(codes.Unimplemented, "method Unsubscribe not implemented")
+func (UnimplementedNatsSyncServiceServer) StopSync(context.Context, *StopSyncRequest) (*StopSyncResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method StopSync not implemented")
 }
 func (UnimplementedNatsSyncServiceServer) mustEmbedUnimplementedNatsSyncServiceServer() {}
 func (UnimplementedNatsSyncServiceServer) testEmbeddedByValue()                         {}
@@ -116,38 +122,38 @@ func RegisterNatsSyncServiceServer(s grpc.ServiceRegistrar, srv NatsSyncServiceS
 	s.RegisterService(&NatsSyncService_ServiceDesc, srv)
 }
 
-func _NatsSyncService_Subscribe_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
-	in := new(SubscribeRequest)
+func _NatsSyncService_StartSync_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(StartSyncRequest)
 	if err := dec(in); err != nil {
 		return nil, err
 	}
 	if interceptor == nil {
-		return srv.(NatsSyncServiceServer).Subscribe(ctx, in)
+		return srv.(NatsSyncServiceServer).StartSync(ctx, in)
 	}
 	info := &grpc.UnaryServerInfo{
 		Server:     srv,
-		FullMethod: NatsSyncService_Subscribe_FullMethodName,
+		FullMethod: NatsSyncService_StartSync_FullMethodName,
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
-		return srv.(NatsSyncServiceServer).Subscribe(ctx, req.(*SubscribeRequest))
+		return srv.(NatsSyncServiceServer).StartSync(ctx, req.(*StartSyncRequest))
 	}
 	return interceptor(ctx, in, info, handler)
 }
 
-func _NatsSyncService_Unsubscribe_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
-	in := new(UnsubscribeRequest)
+func _NatsSyncService_StopSync_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(StopSyncRequest)
 	if err := dec(in); err != nil {
 		return nil, err
 	}
 	if interceptor == nil {
-		return srv.(NatsSyncServiceServer).Unsubscribe(ctx, in)
+		return srv.(NatsSyncServiceServer).StopSync(ctx, in)
 	}
 	info := &grpc.UnaryServerInfo{
 		Server:     srv,
-		FullMethod: NatsSyncService_Unsubscribe_FullMethodName,
+		FullMethod: NatsSyncService_StopSync_FullMethodName,
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
-		return srv.(NatsSyncServiceServer).Unsubscribe(ctx, req.(*UnsubscribeRequest))
+		return srv.(NatsSyncServiceServer).StopSync(ctx, req.(*StopSyncRequest))
 	}
 	return interceptor(ctx, in, info, handler)
 }
@@ -156,18 +162,18 @@ func _NatsSyncService_Unsubscribe_Handler(srv interface{}, ctx context.Context, 
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
 var NatsSyncService_ServiceDesc = grpc.ServiceDesc{
-	ServiceName: "com.github.bredtape.gateway.nats_transfer.v1.NatsSyncService",
+	ServiceName: "com.github.bredtape.gateway.nats_sync.v1.NatsSyncService",
 	HandlerType: (*NatsSyncServiceServer)(nil),
 	Methods: []grpc.MethodDesc{
 		{
-			MethodName: "Subscribe",
-			Handler:    _NatsSyncService_Subscribe_Handler,
+			MethodName: "StartSync",
+			Handler:    _NatsSyncService_StartSync_Handler,
 		},
 		{
-			MethodName: "Unsubscribe",
-			Handler:    _NatsSyncService_Unsubscribe_Handler,
+			MethodName: "StopSync",
+			Handler:    _NatsSyncService_StopSync_Handler,
 		},
 	},
 	Streams:  []grpc.StreamDesc{},
-	Metadata: "nats_sync/v1/msg.proto",
+	Metadata: "msg.proto",
 }

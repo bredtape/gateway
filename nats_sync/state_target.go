@@ -9,6 +9,7 @@ import (
 	v1 "github.com/bredtape/gateway/nats_sync/v1"
 	"github.com/nats-io/nats.go/jetstream"
 	"github.com/pkg/errors"
+	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
 func (s *state) TargetDeliverFromRemote(t time.Time, msgs *v1.Msgs) error {
@@ -32,20 +33,32 @@ func (s *state) TargetDeliverFromRemote(t time.Time, msgs *v1.Msgs) error {
 		return errors.New("messages must be in order")
 	}
 
+	settings := s.cs[key.SourceDeployment]
+	c := len(msgs.GetMessages())
+	for _, m := range s.TargetIncoming[key] {
+		c += len(m.GetMessages())
+	}
+
+	if c > settings.MaxPendingIncomingMessagesPrSubscription {
+		return errors.Wrapf(ErrBackoff, "max pending incoming messages (%d) reached", settings.MaxPendingIncomingMessagesPrSubscription)
+	}
+
+	// all checks passed, add to incoming
+	// (not checking that message sequence aligns here, since messages can be received out of order)
 	s.TargetIncoming[key] = append(s.TargetIncoming[key], msgs)
-	slices.SortFunc(s.TargetIncoming[key], cmpMsgsSequence)
 
 	return nil
 }
 
 // commit set of incoming messages (which mean they have been persisted at the target).
 // Incoming messages will not be deleted, if an error is returned
+// Messages but be persisted with source-sequence
 func (s *state) TargetCommit(msgs *v1.Msgs) error {
 	sub := getTargetSubscription(msgs)
 	key := sub.TargetSubscriptionKey
 
 	for idx, pendingMsgs := range s.TargetIncoming[key] {
-		if !slices.Equal(pendingMsgs.GetSetId(), msgs.GetSetId()) {
+		if pendingMsgs.GetSetId() != msgs.GetSetId() {
 			continue
 		}
 
@@ -65,10 +78,6 @@ func (s *state) TargetCommit(msgs *v1.Msgs) error {
 			SourceStreamName: msgs.GetSourceStreamName(),
 			SequenceFrom:     seq.From,
 			SequenceTo:       seq.To}
-		_, err := NewSetIDFromBytes(msgs.GetSetId())
-		if err != nil {
-			return errors.Wrap(err, "failed to parse set ID")
-		}
 
 		if w, exists := s.targetCommit[key]; !exists {
 			// sequence must start from 0
@@ -85,7 +94,7 @@ func (s *state) TargetCommit(msgs *v1.Msgs) error {
 			}
 		}
 
-		s.targetCommit[key].Commit(sub.SourceDeployment, ack)
+		s.targetCommit[key].Commit(ack)
 		s.TargetIncoming[key] = slices.Delete(s.TargetIncoming[key], idx, idx+1)
 		if len(s.TargetIncoming[key]) == 0 {
 			delete(s.TargetIncoming, key)
@@ -123,22 +132,26 @@ func (x TargetSubscription) Equals(y TargetSubscription) bool {
 
 func getTargetSubscription(msgs *v1.Msgs) TargetSubscription {
 	cc := msgs.GetConsumerConfig()
-	return TargetSubscription{
+	sub := TargetSubscription{
 		TargetSubscriptionKey: TargetSubscriptionKey{
 			SourceDeployment: gateway.Deployment(msgs.GetSourceDeployment()),
 			SourceStreamName: msgs.GetSourceStreamName()},
 		TargetDeployment: gateway.Deployment(msgs.GetTargetDeployment()),
 		DeliverPolicy:    ToDeliverPolicy(cc.GetDeliverPolicy()),
 		OptStartSeq:      cc.GetOptStartSeq(),
-		OptStartTime:     fromUnixTime(cc.GetOptStartTime()),
 		FilterSubjects:   msgs.GetFilterSubjects()}
+
+	if sub.DeliverPolicy == jetstream.DeliverByStartTimePolicy {
+		sub.OptStartTime = cc.GetOptStartTime().AsTime()
+	}
+	return sub
 }
 
 func fromTargetSubscription(sub TargetSubscription) *v1.ConsumerConfig {
 	return &v1.ConsumerConfig{
 		DeliverPolicy: FromDeliverPolicy(sub.DeliverPolicy),
 		OptStartSeq:   sub.OptStartSeq,
-		OptStartTime:  toUnixTime(sub.OptStartTime)}
+		OptStartTime:  timestamppb.New(sub.OptStartTime)}
 }
 
 type TargetCommitWindow struct {
@@ -149,7 +162,7 @@ type TargetCommitWindow struct {
 
 	// pending acks per source deployment (which is the intended destination).
 	// Acks that have been committed and are waiting to be included in the next batch
-	PendingAcks map[gateway.Deployment]map[SetID]*v1.Acknowledge
+	PendingAcks map[SetID]*v1.Acknowledge
 
 	// lowest committed sequence number. This is used to indicate to the source,
 	// if the subscription should be restarted
@@ -158,15 +171,13 @@ type TargetCommitWindow struct {
 	//LowestCommitted uint64
 }
 
-func (w *TargetCommitWindow) Commit(deployment gateway.Deployment, ack *v1.Acknowledge) {
+// commit ack (assuming the matching window has been picked)
+func (w *TargetCommitWindow) Commit(ack *v1.Acknowledge) {
 	if w.PendingAcks == nil {
-		w.PendingAcks = make(map[gateway.Deployment]map[SetID]*v1.Acknowledge)
+		w.PendingAcks = make(map[SetID]*v1.Acknowledge)
 	}
-	if w.PendingAcks[deployment] == nil {
-		w.PendingAcks[deployment] = make(map[SetID]*v1.Acknowledge)
-	}
-	id, _ := NewSetIDFromBytes(ack.GetSetId())
-	w.PendingAcks[deployment][id] = ack
+	id := SetID(ack.GetSetId())
+	w.PendingAcks[id] = ack
 }
 
 func cmpMsgsSequence(a, b *v1.Msgs) int {

@@ -100,13 +100,18 @@ type CommunicationSettings struct {
 
 	// heartbeat interval pr subscription.
 	// If no messages arrive at the target for a subscription, the target should sent
-	// empty Acknowledge at this interval.
+	// empty Acknowledge at this interval and the source should send batches with empty messages.
 	// This may be used to detect if a subscription has stalled at the source
 	// (using the lowest source sequence received).
 	HeartbeatIntervalPrSubscription time.Duration
 
 	// the maximum number of acks that can be pending for a subscription.
+	// Number of messages buffered at the source also counts towards this limit.
 	MaxPendingAcksPrSubscription int
+
+	// the maximum number of messages buffered at the target, waiting to be persisted.
+	// Must be at least MaxPendingAcksPrSubscription
+	MaxPendingIncomingMessagesPrSubscription int
 
 	// -- settings across all subscriptions --
 
@@ -129,6 +134,15 @@ func (s CommunicationSettings) Validate() error {
 	}
 	if s.HeartbeatIntervalPrSubscription < time.Millisecond {
 		return errors.New("HeartbeatIntervalPrSubscription must be at least 1 ms")
+	}
+	if s.MaxPendingAcksPrSubscription <= 0 {
+		return errors.New("MaxPendingAcksPrSubscription must be positive")
+	}
+	if s.MaxPendingIncomingMessagesPrSubscription <= 0 {
+		return errors.New("MaxPendingIncomingMessagesPrSubscription must be positive")
+	}
+	if s.MaxPendingIncomingMessagesPrSubscription < s.MaxPendingAcksPrSubscription {
+		return errors.New("MaxPendingIncomingMessagesPrSubscription must be at least MaxPendingAcksPrSubscription")
 	}
 	if s.MaxAccumulatedPayloadSizeBytes <= 0 {
 		return errors.New("MaxAccumulatedPayloadSizeBytes must be positive")
@@ -218,7 +232,7 @@ func (ns *NatsSync) CreateSubscriptionStream(ctx context.Context) (jetstream.Str
 // publish Subscription request for the subscription itself from source to target deployment.
 // The same request must be published at both the source and target deployment.
 func (ns *NatsSync) PublishBootstrapSubscription(ctx context.Context, source, target gateway.Deployment) (*jetstream.PubAck, error) {
-	req := &v1.SubscribeRequest{
+	req := &v1.StartSyncRequest{
 		SourceDeployment: source.String(),
 		ReplyDeployment:  source.String(),
 		TargetDeployment: target.String(),
@@ -231,7 +245,7 @@ func (ns *NatsSync) PublishBootstrapSubscription(ctx context.Context, source, ta
 	return ns.publishSubscribeRequest(ctx, req)
 }
 
-func (ns *NatsSync) publishSubscribeRequest(ctx context.Context, req *v1.SubscribeRequest) (*jetstream.PubAck, error) {
+func (ns *NatsSync) publishSubscribeRequest(ctx context.Context, req *v1.StartSyncRequest) (*jetstream.PubAck, error) {
 	subject := fmt.Sprintf("%s.%s.%s", ns.config.SubscriptionStream,
 		req.TargetDeployment, req.SourceDeployment)
 

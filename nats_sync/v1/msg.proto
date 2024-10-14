@@ -1,25 +1,29 @@
 syntax = "proto3";
 
-package com.github.bredtape.gateway.nats_transfer.v1;
+package com.github.bredtape.gateway.nats_sync.v1;
+
+import "google/protobuf/timestamp.proto";
 
 option go_package = "github.com/bredtape/gateway/nats_sync/v1";
 
 
 // nats sync service, to initiate sync of a stream from one deployment to another.
-// To bootstrap the NatsSyncService itself, all deployments must have the Subscribe requests published to their designated nats stream for this service (which matches either the source or target deployment)
+// To bootstrap the NatsSyncService itself, all deployments must have the
+// StartSync requests published to their designated nats stream for this service
+// (which matches either the source or target deployment)
 service NatsSyncService {
-  // Subscribe to a stream
-  // Only one subscription can be active pr combination of source_deployment, source_stream_name and target_deployment
-  // You cannot change a subscription but must send a UnsubscribeRequest, then a new SubscribeRequest
-  rpc Subscribe(SubscribeRequest) returns (SubscribeResponse);
+  // Start sync'ing a stream from one deployment to another.
+  // Only one sync operation can be active pr combination of source_deployment, source_stream_name and target_deployment
+  // You cannot change the parameters of the sync operation,  but must send a StopSync,
+  // then a new StartSync
+  rpc StartSync(StartSyncRequest) returns (StartSyncResponse);
 
-  // Unsubscribe from a stream. See note on Subscribe
-  rpc Unsubscribe(UnsubscribeRequest) returns (UnsubscribeResponse);
+  // Stop sync of a stream. See note on StartSync
+  rpc StopSync(StopSyncRequest) returns (StopSyncResponse);
 }
 
-// subscribe request
-message SubscribeRequest {
-  // the deployment to subscribe from
+message StartSyncRequest {
+  // the deployment to sync from
   string source_deployment = 1;
 
   // the deployment to send the reply back to
@@ -41,8 +45,8 @@ message SubscribeRequest {
   ConsumerConfig consumer_config = 7;
 }
 
-message SubscribeResponse {
-  // the deployment to subscribe from
+message StartSyncResponse {
+  // the deployment to sync from
   string source_deployment = 1;
 
   // the deployment to send the reply back to
@@ -64,8 +68,7 @@ message SubscribeResponse {
   ConsumerConfig consumer_config = 7;
 }
 
-// unsubscribe request
-message UnsubscribeRequest {
+message StopSyncRequest {
   // the deployment to unsubscribe from
   string source_deployment = 1;
 
@@ -86,14 +89,14 @@ message UnsubscribeRequest {
   repeated string filter_subjects = 6;
 }
 
-message UnsubscribeResponse {
-  // the deployment to unsubscribe from
+message StopSyncResponse {
+  // the deployment where sync was requested from
   string source_deployment = 1;
 
   // the deployment to send the reply back to
   string reply_deployment = 2;
 
-  // the deployment the messages are to be published
+  // the deployment where sync was requested to
   string target_deployment = 3;
 
   // source stream name
@@ -108,18 +111,17 @@ message UnsubscribeResponse {
 
 }
 
+// ConsumerConfig defines the configuration for message consumption
 message ConsumerConfig {
-  // deliver policy at the source deployment. Used on initial subscription
-  // and when gaps have been detected between source and target (because messages have been
-  // deleted due to retention policy at the source/target).
-  // Otherwise, sequence will be used.
+  // DeliverPolicy determines how messages are delivered from the source deployment.
+  // It's used on initial subscription and when gaps are detected between source and target.
   DeliverPolicy deliver_policy = 1;
 
-  // used when deliver policy is by start sequence
+  // OptStartSeq specifies the starting sequence number when deliver_policy is DELIVER_POLICY_BY_START_SEQUENCE.
   uint64 opt_start_seq = 2;
 
-  // used when deliver policy is by start time. In seconds since Unix epoch
-  double opt_start_time = 3;
+  // OptStartTime specifies the starting time when deliver_policy is DELIVER_POLICY_BY_START_TIME.
+  google.protobuf.Timestamp opt_start_time = 3;
 }
 
 enum DeliverPolicy {
@@ -161,8 +163,8 @@ message Msg {
   // source sequence
   uint64 sequence = 4;
 
-  // when the Msg was published to the source. In seconds since Unix epoch
-  double publish_timestamp = 6;
+  // when the Msg was published to the source.
+  google.protobuf.Timestamp publish_timestamp = 5;
 }
 
 // messages belonging to the same deployment, source stream and subscription
@@ -170,7 +172,7 @@ message Msgs {
   // set id, a unique uuid per set of messages
   // This is needed because old irrelevant messages may be delivered, and
   // must be ignored
-  bytes set_id = 1;
+  string set_id = 1;
 
   // source deployment
   string source_deployment = 2;
@@ -192,13 +194,13 @@ message Msgs {
 
   // messages matching the stream name and subject filters.
   // Ordered by sequence. May be empty. May have gaps in sequence.
-  repeated Msg messages = 9;
+  repeated Msg messages = 8;
 }
 
 // acknowledge combination of stream name, subject and sequence
 message Acknowledge {
   // set id, matching Msgs
-  bytes set_id = 1;
+  string set_id = 1;
 
   string source_stream_name = 2;
 
@@ -209,12 +211,14 @@ message Acknowledge {
   uint64 sequence_to = 4;
 
   // to indicate not-acknowledge, in which case the subscription will be restarted.
-  // If lowest_ack_sequence is set, the subscription will resume from that sequence.
+  // If sequence_from is set, the subscription will resume from that sequence.
   // Duplicates must be acknowledged
   bool is_nak = 5;
 
   // reason, should be specified when NAK
-  // possible scenarios: message loss/corrupted, message missing (gap, have received newer but is missing some), rejected (because subscription is not active at the target deployment, or a conflicting subscription is active)
+  // possible scenarios: message loss/corrupted, message missing (gap,
+  // have received newer but is missing some), rejected (because subscription is
+  // not active at the target deployment, or a conflicting subscription is active)
   string reason = 6;
 }
 
@@ -226,7 +230,7 @@ message MessageBatch {
   // timestamp of when this message has been sent
   // used to estimate latency between deployments.
   // In seconds since Unix epoch
-  double sent_timestamp = 3;
+  google.protobuf.Timestamp sent_timestamp = 3;
 
   repeated Acknowledge acknowledges = 4;
   repeated Msgs list_of_messages = 5;
