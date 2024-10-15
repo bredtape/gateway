@@ -23,6 +23,7 @@ var (
 	ErrSlowConsumer         = errors.New("slow consumer")
 	ErrSourceSequenceBroken = errors.New("source sequence broken. Subscription must be restarted")
 	ErrBackoff              = errors.New("cannot accept new messages, pending messages must be dispatched first")
+	ErrPayloadTooLarge      = errors.New("payload too large")
 )
 
 /* TODO:
@@ -52,6 +53,9 @@ heartbeat:
 		* but some messages must have been sent before (to initialize the window)
 [ ] at target, accept empty Msgs and send Acknowledge
 
+max size:
+[x] at source, do not send batches that exceed MaxAccumulatedPayloadSizeBytes
+
 flush:
 [ ] at source, with pending messages/acks pr target, indicate the earliest time messages/acks should be sent to the target
 
@@ -60,7 +64,7 @@ short circuit:
 	  only 'heartbeats'. How to "back-on"?
 
 fault scenarios:
-[ ] at source, subscription is continuously restarted, all pendings acks are deleted and a new batch is sent
+[?] at source, subscription is continuously restarted, all pendings acks are deleted and a new batch is sent
 	  again and again. Can this happen? How to detect?
 */
 
@@ -193,25 +197,25 @@ func (s *state) CreateMessageBatch(now time.Time, to gateway.Deployment) (*v1.Me
 		FromDeployment: s.deployment.String(),
 		SentTimestamp:  timestamppb.New(now.UTC())}
 
-	for key := range s.sourceOutgoing[to] {
-		b := s.packMessages(key)
-		m.ListOfMessages = append(m.ListOfMessages, b...)
-	}
-
-	for _, w := range s.targetCommit {
-		for _, ack := range w.PendingAcks {
-			m.Acknowledges = append(m.Acknowledges, ack)
-		}
-	}
-
 	settings := s.cs[to]
+
+	remainingPayloadCapacity := settings.MaxAccumulatedPayloadSizeBytes
 	for key, w := range s.sourceAckWindows {
 		if key.TargetDeployment != to {
 			continue
 		}
 
 		ids := w.GetRetransmit(now, settings.AckTimeoutPrSubscription, settings.AckRetryPrSubscription)
-		m.ListOfMessages = append(m.ListOfMessages, s.repackMessages(key, ids)...)
+		xs := s.repackMessages(key, ids)
+
+		// add messages to batch. We can't breakup a set of messages, so we must include all messages
+		for _, x := range xs {
+			m.ListOfMessages = append(m.ListOfMessages, x)
+			remainingPayloadCapacity -= getPayloadSize(x)
+			if remainingPayloadCapacity <= 0 {
+				break
+			}
+		}
 
 		if !w.ShouldSentHeartbeat(now, settings.HeartbeatIntervalPrSubscription) {
 			continue
@@ -229,6 +233,23 @@ func (s *state) CreateMessageBatch(now time.Time, to gateway.Deployment) (*v1.Me
 			SourceStreamName: key.SourceStreamName,
 			LastSequence:     w.Extrema.To,
 			ConsumerConfig:   fromSourceSubscription(sub)})
+	}
+
+	for key := range s.sourceOutgoing[to] {
+		xs := s.packMessages(remainingPayloadCapacity, key)
+		for _, x := range xs {
+			m.ListOfMessages = append(m.ListOfMessages, x)
+			remainingPayloadCapacity -= getPayloadSize(x)
+			if remainingPayloadCapacity <= 0 {
+				break
+			}
+		}
+	}
+
+	for _, w := range s.targetCommit {
+		for _, ack := range w.PendingAcks {
+			m.Acknowledges = append(m.Acknowledges, ack)
+		}
 	}
 
 	if len(m.ListOfMessages) == 0 && len(m.Acknowledges) == 0 {
@@ -314,7 +335,14 @@ func (s *state) MarkDispatched(b *v1.MessageBatch) DispatchReport {
 			msgsErrs[key] = errors.Wrap(err, "failed to mark dispatched")
 		}
 
-		delete(s.sourceOutgoing[d], key)
+		// only remove messages included in the batch
+		xs := s.sourceOutgoing[d][key]
+		idx, found := findSequenceIndex(xs, ack.SequenceRange.To)
+		if found && (idx+1) < len(xs) {
+			s.sourceOutgoing[d][key] = xs[idx+1:]
+		} else {
+			s.sourceOutgoing[d][key] = nil
+		}
 	}
 
 	// acknowledges
@@ -460,4 +488,12 @@ func (s *state) Validate() error {
 		}
 	}
 	return nil
+}
+
+func getPayloadSize(m *v1.Msgs) int {
+	size := 0
+	for _, x := range m.Messages {
+		size += len(x.Data)
+	}
+	return size
 }

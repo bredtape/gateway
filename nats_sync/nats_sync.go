@@ -94,10 +94,6 @@ type CommunicationSettings struct {
 	// backoff strategy for retrying when nak is received or ack is not received within timeout
 	//NakBackoffPrSubscription retry.Retryer
 
-	// interval to wait for more messages for the same subscription before sending them in a batch
-	// should be much lower than AckTimeout
-	FlushIntervalPrSubscription time.Duration
-
 	// heartbeat interval pr subscription.
 	// If no messages arrive at the target for a subscription, the target should sent
 	// empty Acknowledge at this interval and the source should send batches with empty messages.
@@ -105,8 +101,8 @@ type CommunicationSettings struct {
 	// (using the lowest source sequence received).
 	HeartbeatIntervalPrSubscription time.Duration
 
-	// the maximum number of acks that can be pending for a subscription.
-	// Number of messages buffered at the source also counts towards this limit.
+	// the maximum number of messages with pending acks for a subscription.
+	// Number of messages buffered at the source also counts towards this limit
 	MaxPendingAcksPrSubscription int
 
 	// the maximum number of messages buffered at the target, waiting to be persisted.
@@ -132,15 +128,6 @@ func (s CommunicationSettings) Validate() error {
 	}
 	if s.AckRetryPrSubscription.MaxDuration() < s.AckTimeoutPrSubscription {
 		return errors.New("AckRetryPrSubscription MaxDuration must be at least AckTimeoutPrSubscription")
-	}
-	// if s.NakBackoffPrSubscription == nil {
-	// 	return errors.New("NakBackoffPrSubscription empty")
-	// }
-	// if s.NakBackoffPrSubscription.MaxDuration() < time.Millisecond {
-	// 	return errors.New("NakBackoffPrSubscription must be at least 1 ms")
-	// }
-	if s.FlushIntervalPrSubscription >= s.AckTimeoutPrSubscription {
-		return errors.New("FlushIntervalPrSubscription must be less than AckTimeoutPrSubscription")
 	}
 	if s.HeartbeatIntervalPrSubscription < time.Millisecond {
 		return errors.New("HeartbeatIntervalPrSubscription must be at least 1 ms")

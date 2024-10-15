@@ -100,6 +100,12 @@ func (s *state) SourceDeliverFromLocal(key SourceSubscriptionKey, lastSequence u
 		return 0, errors.New("messages must be in order")
 	}
 
+	for _, m := range messages {
+		if len(m.Data) > settings.MaxAccumulatedPayloadSizeBytes {
+			return 0, errors.Wrapf(ErrPayloadTooLarge, "message sequence %d", m.GetSequence())
+		}
+	}
+
 	if len(messages) > 0 && messages[0].Sequence <= lastSequence {
 		return 0, errors.Wrapf(ErrSourceSequenceBroken, "message sequence %d must be after lastSequence %d", messages[0].Sequence, lastSequence)
 	}
@@ -133,7 +139,7 @@ func (s *state) SourceDeliverFromLocal(key SourceSubscriptionKey, lastSequence u
 	return acceptCount, nil
 }
 
-func (s *state) packMessages(key SourceSubscriptionKey) []*v1.Msgs {
+func (s *state) packMessages(payloadCapacity int, key SourceSubscriptionKey) []*v1.Msgs {
 	messages, exists := s.sourceOutgoing[key.TargetDeployment][key]
 	if !exists {
 		return nil
@@ -151,10 +157,22 @@ func (s *state) packMessages(key SourceSubscriptionKey) []*v1.Msgs {
 		SourceStreamName: key.SourceStreamName,
 		FilterSubjects:   sub.FilterSubjects,
 		ConsumerConfig:   fromSourceSubscription(sub),
-		Messages:         messages}
+		Messages:         make([]*v1.Msg, 0, min(len(messages), payloadCapacity))}
+
+	for _, m := range messages {
+		payloadCapacity -= len(m.Data)
+		if payloadCapacity < 0 {
+			break
+		}
+		b.Messages = append(b.Messages, m)
+	}
 
 	if w, exists := s.sourceAckWindows[key]; exists {
 		b.LastSequence = w.Extrema.To
+	}
+
+	if len(b.Messages) == 0 {
+		return nil
 	}
 
 	return []*v1.Msgs{b}
@@ -224,7 +242,7 @@ func (s *state) SourceHandleTargetAck(currentTime, sentTime time.Time, targetDep
 	if p.IsNAK {
 		// keep messages from Extrema.To, if found
 		if w.Extrema.To > 0 {
-			keepers := keepMessagesFrom(w.Extrema.To, s.sourceOutgoing[key.TargetDeployment][key])
+			keepers := keepMessagesFrom(s.sourceOutgoing[key.TargetDeployment][key], w.Extrema.To)
 			if len(keepers) > 0 {
 				w.Extrema.To = keepers[len(keepers)-1].GetSequence()
 			}
@@ -303,13 +321,18 @@ func (s *state) sourceCalculateAcceptCount(key SourceSubscriptionKey, isReset bo
 
 // keep messages from the sequence number
 // The sequence number must be in the list
-func keepMessagesFrom(from uint64, messages []*v1.Msg) []*v1.Msg {
-	idx, found := slices.BinarySearchFunc(messages, from, func(msg *v1.Msg, seq uint64) int {
-		return cmp.Compare(msg.GetSequence(), seq)
-	})
+func keepMessagesFrom(messages []*v1.Msg, from uint64) []*v1.Msg {
+	idx, found := findSequenceIndex(messages, from)
 	if !found {
 		return nil
 	}
 
 	return messages[idx:]
+}
+
+func findSequenceIndex(messages []*v1.Msg, seq uint64) (int, bool) {
+	idx, found := slices.BinarySearchFunc(messages, seq, func(msg *v1.Msg, x uint64) int {
+		return cmp.Compare(msg.GetSequence(), x)
+	})
+	return idx, found
 }

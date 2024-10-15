@@ -15,14 +15,12 @@ import (
 
 var (
 	testDefaultComm = CommunicationSettings{
-		AckTimeoutPrSubscription: 1 * time.Second,
-		AckRetryPrSubscription:   retry.Must(retry.NewSeq(0, 2*time.Second, 5*time.Second)),
-		//NakBackoffPrSubscription:                 retry.Must(retry.NewExp(0.2, 1*time.Second, 5*time.Second)),
-		FlushIntervalPrSubscription:              5 * time.Millisecond,
+		AckTimeoutPrSubscription:                 1 * time.Second,
+		AckRetryPrSubscription:                   retry.Must(retry.NewSeq(0, 2*time.Second, 5*time.Second)),
 		HeartbeatIntervalPrSubscription:          time.Minute,
 		MaxPendingAcksPrSubscription:             10,
 		MaxPendingIncomingMessagesPrSubscription: 10,
-		MaxAccumulatedPayloadSizeBytes:           2 << 10}
+		MaxAccumulatedPayloadSizeBytes:           1 << 10}
 )
 
 func TestStateSourceBasic(t *testing.T) {
@@ -960,6 +958,100 @@ func TestStateSourceHeartbeat(t *testing.T) {
 							})
 						})
 					})
+				})
+			})
+		})
+	})
+}
+
+func TestStateSourceMaxPayloadSize(t *testing.T) {
+	Convey("init state", t, func() {
+		source := gateway.Deployment("xx")
+		target := gateway.Deployment("yy")
+
+		maxSize := testDefaultComm.MaxAccumulatedPayloadSizeBytes
+		s, err := newState(source, map[gateway.Deployment]CommunicationSettings{
+			target: testDefaultComm}, nil)
+		So(err, ShouldBeNil)
+
+		Convey("assumed max size is 1kB", func() {
+			So(maxSize, ShouldEqual, 1024)
+		})
+
+		Convey("register subscription, with this deployment as the source", func() {
+			req := &v1.StartSyncRequest{
+				SourceDeployment: source.String(),
+				ReplyDeployment:  source.String(),
+				TargetDeployment: target.String(),
+				SourceStreamName: "stream1",
+				TargetStreamName: "stream2",
+				ConsumerConfig: &v1.ConsumerConfig{
+					DeliverPolicy: v1.DeliverPolicy_DELIVER_POLICY_ALL}}
+			err := s.RegisterSubscription(req)
+			So(err, ShouldBeNil)
+
+			key := SourceSubscriptionKey{
+				TargetDeployment: target,
+				SourceStreamName: "stream1"}
+
+			Convey("deliver msg to local, smaller than max size", func() {
+				msg1 := &v1.Msg{
+					Subject:  "x.y.z",
+					Data:     []byte("123"),
+					Sequence: 1}
+				count, err := s.SourceDeliverFromLocal(key, 0, msg1)
+				So(err, ShouldBeNil)
+				So(count, ShouldEqual, 1)
+
+				Convey("create batch, should have 1 message", func() {
+					b, err := s.CreateMessageBatch(time.Now(), target)
+					So(err, ShouldBeNil)
+					So(b.GetListOfMessages(), ShouldHaveLength, 1)
+					So(b.GetListOfMessages()[0].GetMessages(), ShouldHaveLength, 1)
+				})
+
+				Convey("then deliver msg, just below max size", func() {
+					msg1 := &v1.Msg{
+						Subject:  "x.y.z",
+						Data:     make([]byte, maxSize-1),
+						Sequence: 2}
+
+					_, err := s.SourceDeliverFromLocal(key, 1, msg1)
+					So(err, ShouldBeNil)
+					So(count, ShouldEqual, 1)
+
+					Convey("should have 2 outgoing messages (in pending stats)", func() {
+						So(s.PendingStats(time.Now(), target), ShouldResemble, []int{2, 0})
+					})
+
+					Convey("create batch, should only include 1 message, not the 2nd message", func() {
+						b, err := s.CreateMessageBatch(time.Now(), target)
+						So(err, ShouldBeNil)
+						So(b.GetListOfMessages(), ShouldHaveLength, 1)
+						So(b.GetListOfMessages()[0].GetMessages(), ShouldHaveLength, 1)
+
+						Convey("dispatch batch", func() {
+							report := s.MarkDispatched(b)
+							So(report.IsEmpty(), ShouldBeTrue)
+
+							Convey("should have 1 outgoing messages", func() {
+								So(s.PendingStats(time.Now(), target), ShouldResemble, []int{1, 0})
+							})
+						})
+					})
+				})
+			})
+
+			Convey("deliver msg to local, bigger than max size", func() {
+				msg1 := &v1.Msg{
+					Subject:  "x.y.z",
+					Data:     make([]byte, maxSize+1),
+					Sequence: 1}
+				_, err := s.SourceDeliverFromLocal(key, 0, msg1)
+
+				Convey("should complain with ErrPayloadTooLarge", func() {
+					So(err, ShouldNotBeNil)
+					So(errors.Is(err, ErrPayloadTooLarge), ShouldBeTrue)
 				})
 			})
 		})
