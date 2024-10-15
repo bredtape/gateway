@@ -17,7 +17,7 @@ func TestStateTargetBasic(t *testing.T) {
 		source := gateway.Deployment("xx")
 		target := gateway.Deployment("yy")
 		s, err := newState(target, map[gateway.Deployment]CommunicationSettings{
-			source: testDefaultComm})
+			source: testDefaultComm}, nil)
 		So(err, ShouldBeNil)
 
 		msg1 := &v1.Msg{
@@ -46,7 +46,8 @@ func TestStateTargetBasic(t *testing.T) {
 				key := SourceSubscriptionKey{
 					TargetDeployment: target,
 					SourceStreamName: "stream1"}
-				So(s.SourceLocalSubscriptions, ShouldNotContainKey, key)
+				_, exists := s.GetSourceLocalSubscriptions(key)
+				So(exists, ShouldBeFalse)
 			})
 
 			key := TargetSubscriptionKey{
@@ -142,12 +143,12 @@ func TestStateTargetBasic(t *testing.T) {
 	})
 }
 
-func TestStateTargetBackoff(t *testing.T) {
+func TestStateTargetBackpressure(t *testing.T) {
 	Convey("init state", t, func() {
 		source := gateway.Deployment("xx")
 		target := gateway.Deployment("yy")
 		s, err := newState(target, map[gateway.Deployment]CommunicationSettings{
-			source: testDefaultComm})
+			source: testDefaultComm}, nil)
 		So(err, ShouldBeNil)
 
 		maxPending := testDefaultComm.MaxPendingIncomingMessagesPrSubscription
@@ -229,6 +230,81 @@ func TestStateTargetBackoff(t *testing.T) {
 
 					Convey("should still have 1 incoming Msgs", func() {
 						So(s.TargetIncoming[key], ShouldHaveLength, 1)
+					})
+				})
+			})
+		})
+	})
+}
+
+func TestStateTargetNak(t *testing.T) {
+	now := time.Now()
+
+	Convey("init state", t, func() {
+		source := gateway.Deployment("xx")
+		target := gateway.Deployment("yy")
+		s, err := newState(target, map[gateway.Deployment]CommunicationSettings{
+			source: testDefaultComm}, nil)
+		So(err, ShouldBeNil)
+
+		Convey("register subscription, with this deployment as the target", func() {
+			req := &v1.StartSyncRequest{
+				SourceDeployment: source.String(),
+				ReplyDeployment:  source.String(),
+				TargetDeployment: target.String(),
+				SourceStreamName: "stream1",
+				TargetStreamName: "stream2",
+				ConsumerConfig:   &v1.ConsumerConfig{DeliverPolicy: v1.DeliverPolicy_DELIVER_POLICY_ALL}}
+			err := s.RegisterSubscription(req)
+			So(err, ShouldBeNil)
+
+			key := TargetSubscriptionKey{
+				SourceDeployment: source,
+				SourceStreamName: "stream1"}
+
+			Convey("deliver a msg with last sequence>0", func() {
+
+				msg := &v1.Msg{
+					Subject:          "x.y.z",
+					Data:             []byte("123"),
+					Sequence:         31,
+					PublishTimestamp: timestamppb.Now()}
+
+				msgs1 := &v1.Msgs{
+					SetId:            NewSetID().String(),
+					SourceDeployment: "xx",
+					TargetDeployment: "yy",
+					SourceStreamName: "stream1",
+					ConsumerConfig:   &v1.ConsumerConfig{DeliverPolicy: v1.DeliverPolicy_DELIVER_POLICY_ALL},
+					LastSequence:     30,
+					Messages:         []*v1.Msg{msg}}
+
+				t0 := time.Now()
+				err := s.TargetDeliverFromRemote(t0, msgs1)
+				So(err, ShouldBeNil)
+
+				Convey("should have 1 incoming Msgs", func() {
+					So(s.TargetIncoming[key], ShouldHaveLength, 1)
+				})
+
+				Convey("reject set ID", func() {
+					err := s.TargetCommitReject(msgs1, 0)
+					So(err, ShouldBeNil)
+
+					Convey("should not have incoming messages", func() {
+						So(s.TargetIncoming[key], ShouldBeEmpty)
+					})
+
+					Convey("should have 1 pending ack", func() {
+						So(s.PendingStats(now, source), ShouldResemble, []int{0, 1})
+
+						b1, err := s.CreateMessageBatch(time.Now(), source)
+						So(err, ShouldBeNil)
+						nak := b1.Acknowledges[0]
+
+						Convey("should indicate nak", func() {
+							So(nak.IsNak, ShouldBeTrue)
+						})
 					})
 				})
 			})

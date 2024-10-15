@@ -1,6 +1,7 @@
 package nats_sync
 
 import (
+	"cmp"
 	"slices"
 	"time"
 
@@ -11,23 +12,41 @@ import (
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
+// requested local subscription (may be different from original subscription)
+func (s *state) GetSourceLocalSubscriptions(key SourceSubscriptionKey) (SourceSubscription, bool) {
+	sub, exists := s.sourceOriginalSubscription[key]
+	if !exists {
+		return SourceSubscription{}, false
+	}
+
+	w := s.sourceAckWindows[key]
+
+	if w != nil && w.Extrema.To > 0 {
+		return SourceSubscription{
+			SourceSubscriptionKey: key,
+			DeliverPolicy:         jetstream.DeliverByStartSequencePolicy,
+			OptStartSeq:           w.Extrema.To,
+			FilterSubjects:        sub.FilterSubjects}, true
+	}
+
+	return sub.Clone(), true
+}
+
 // deliver local messages from requested subscriptions (to be sent to remote)
 // Messages must be in order.
 // The lastSequence must match the last message in the previous batch,
-// or 0 if the subscription has been restarted
+// or 0 if the subscription has been restarted. If messages are out of order,
+// a ErrSourceSequenceBroken is returned (and the subscription must be restarted)
 // If more messages are attempted to be delivered than outgoing and pending,
 // an error of ErrBackoff is returned. Messages may be partial delivered, indicated
 // by the returned count!
 func (s *state) SourceDeliverFromLocal(key SourceSubscriptionKey, lastSequence uint64, messages ...*v1.Msg) (int, error) {
-	_, exists := s.SourceLocalSubscriptions[key]
-	if !exists {
+	if _, exists := s.sourceOriginalSubscription[key]; !exists {
 		return 0, errors.Wrapf(ErrNoSubscription, "no local subscription for key %v", key)
 	}
 
-	settings := s.cs[key.TargetDeployment]
-	w, exists := s.sourceAckWindows[key]
-
 	// backoff
+	settings := s.cs[key.TargetDeployment]
 	acceptCount := s.sourceCalculateAcceptCount(key, lastSequence == 0)
 	if acceptCount == 0 {
 		return 0, errors.Wrapf(ErrBackoff, "max pending acks (%d) reached, only accepting %d", settings.MaxPendingAcksPrSubscription, acceptCount)
@@ -36,8 +55,12 @@ func (s *state) SourceDeliverFromLocal(key SourceSubscriptionKey, lastSequence u
 		acceptCount = len(messages)
 	}
 
-	// no ack window
-	if !exists && lastSequence != 0 {
+	w, exists := s.sourceAckWindows[key]
+	if !exists {
+		w = &SourcePendingWindow{}
+	}
+
+	if lastSequence > 0 {
 		pendingMessages := s.sourceOutgoing[key.TargetDeployment][key]
 
 		// lastSequence must match the last pending message
@@ -46,13 +69,11 @@ func (s *state) SourceDeliverFromLocal(key SourceSubscriptionKey, lastSequence u
 			if seq != lastSequence {
 				return 0, errors.Wrapf(ErrSourceSequenceBroken, "last sequence %d does not match last message %d", lastSequence, seq)
 			}
-		} else {
-			return 0, errors.Wrap(ErrSourceSequenceBroken, "no ack window exists, first ack must have sequence From 0")
 		}
-	}
 
-	if exists && w.Extrema.To != lastSequence {
-		return 0, errors.Wrapf(ErrSourceSequenceBroken, "pending window %s does not match last sequence %d", w.Extrema.String(), lastSequence)
+		if w.Extrema.To != lastSequence {
+			return 0, errors.Wrapf(ErrSourceSequenceBroken, "pending window %s does not match last sequence %d", w.Extrema.String(), lastSequence)
+		}
 	}
 
 	// when lastSequence > 0:
@@ -85,10 +106,18 @@ func (s *state) SourceDeliverFromLocal(key SourceSubscriptionKey, lastSequence u
 
 	// only checks before this point
 
-	// ack window reset
-	if exists && lastSequence == 0 {
-		delete(s.sourceAckWindows, key)
+	if !exists {
+		s.sourceAckWindows[key] = w
 	}
+
+	// ack window reset, ignore all pending and acknowledged
+	if lastSequence == 0 {
+		w.Pending = nil
+		w.Acknowledged = nil
+		w.Extrema.From = 0
+	}
+
+	w.Extrema.To = messages[acceptCount-1].GetSequence()
 
 	// prune existing messages if subscription was restarted
 	if _, exists := s.sourceOutgoing[key.TargetDeployment]; !exists || lastSequence == 0 {
@@ -104,7 +133,7 @@ func (s *state) SourceDeliverFromLocal(key SourceSubscriptionKey, lastSequence u
 	return acceptCount, nil
 }
 
-func (s *state) packMessages(key SourceSubscriptionKey) *v1.Msgs {
+func (s *state) packMessages(key SourceSubscriptionKey) []*v1.Msgs {
 	messages, exists := s.sourceOutgoing[key.TargetDeployment][key]
 	if !exists {
 		return nil
@@ -117,6 +146,7 @@ func (s *state) packMessages(key SourceSubscriptionKey) *v1.Msgs {
 
 	b := &v1.Msgs{
 		SetId:            NewSetID().String(),
+		SourceDeployment: s.deployment.String(),
 		TargetDeployment: key.TargetDeployment.String(),
 		SourceStreamName: key.SourceStreamName,
 		FilterSubjects:   sub.FilterSubjects,
@@ -127,7 +157,32 @@ func (s *state) packMessages(key SourceSubscriptionKey) *v1.Msgs {
 		b.LastSequence = w.Extrema.To
 	}
 
-	return b
+	return []*v1.Msgs{b}
+}
+
+// repack messages, if pending acknowledgement has timed out
+func (s *state) repackMessages(key SourceSubscriptionKey, ids []SetID) []*v1.Msgs {
+	w, exists := s.sourceAckWindows[key]
+	if !exists {
+		return nil
+	}
+
+	var result []*v1.Msgs
+	for _, id := range ids {
+		pending, exists := w.Pending[id]
+		if !exists {
+			panic("no pending")
+		}
+
+		result = append(result, &v1.Msgs{
+			SetId:            pending.SetID.String(),
+			TargetDeployment: key.TargetDeployment.String(),
+			SourceStreamName: key.SourceStreamName,
+			ConsumerConfig:   fromSourceSubscription(s.sourceOriginalSubscription[key]),
+			LastSequence:     pending.SequenceRange.From,
+			Messages:         pending.Messages})
+	}
+	return result
 }
 
 // handle incoming ack from target deployment
@@ -137,13 +192,9 @@ func (s *state) SourceHandleTargetAck(currentTime, sentTime time.Time, targetDep
 		TargetDeployment: targetDeployment,
 		SourceStreamName: ack.GetSourceStreamName()}
 
-	sub, exists := s.sourceOriginalSubscription[key]
+	_, exists := s.sourceOriginalSubscription[key]
 	if !exists {
 		return errors.Wrapf(ErrNoSubscription, "no subscription for key %v", key)
-	}
-
-	if ack.GetIsNak() {
-		return errors.New("not implemented")
 	}
 
 	w, exists := s.sourceAckWindows[key]
@@ -154,26 +205,33 @@ func (s *state) SourceHandleTargetAck(currentTime, sentTime time.Time, targetDep
 
 	p := SourcePendingAck{
 		SetID:         SetID(ack.GetSetId()),
+		IsNAK:         ack.GetIsNak(),
 		SentTimestamp: sentTime,
 		SequenceRange: RangeInclusive[uint64]{
 			From: ack.GetSequenceFrom(),
 			To:   ack.GetSequenceTo()},
-		// Count not specified,
+		// Messages not specified
 	}
 
 	// only checks before this point
 
-	changes, err := w.ReceiveAck(p)
+	err := w.ReceiveAck(currentTime, p)
 	if err != nil {
 		return errors.Wrap(err, "failed to process ack")
 	}
 
-	if changes {
-		s.SourceLocalSubscriptions[key] = SourceSubscription{
-			SourceSubscriptionKey: key,
-			DeliverPolicy:         jetstream.DeliverByStartSequencePolicy,
-			OptStartSeq:           w.Extrema.From,
-			FilterSubjects:        sub.FilterSubjects}
+	// if nak, delete pending messages
+	if p.IsNAK {
+		// keep messages from Extrema.To, if found
+		if w.Extrema.To > 0 {
+			keepers := keepMessagesFrom(w.Extrema.To, s.sourceOutgoing[key.TargetDeployment][key])
+			if len(keepers) > 0 {
+				w.Extrema.To = keepers[len(keepers)-1].GetSequence()
+			}
+			s.sourceOutgoing[key.TargetDeployment][key] = keepers
+		} else {
+			delete(s.sourceOutgoing[key.TargetDeployment], key)
+		}
 	}
 
 	return nil
@@ -189,6 +247,15 @@ type SourceSubscription struct {
 	FilterSubjects []string
 }
 
+func (s SourceSubscription) Clone() SourceSubscription {
+	return SourceSubscription{
+		SourceSubscriptionKey: s.SourceSubscriptionKey,
+		DeliverPolicy:         s.DeliverPolicy,
+		OptStartSeq:           s.OptStartSeq,
+		OptStartTime:          s.OptStartTime,
+		FilterSubjects:        slices.Clone(s.FilterSubjects)}
+}
+
 func toSourceSubscription(targetDeployment gateway.Deployment, sourceStream string, s *v1.ConsumerConfig, filterSubjects []string) SourceSubscription {
 	sub := SourceSubscription{
 		SourceSubscriptionKey: SourceSubscriptionKey{
@@ -197,6 +264,7 @@ func toSourceSubscription(targetDeployment gateway.Deployment, sourceStream stri
 		DeliverPolicy:  ToDeliverPolicy(s.GetDeliverPolicy()),
 		OptStartSeq:    s.GetOptStartSeq(),
 		FilterSubjects: filterSubjects}
+	slices.Sort(sub.FilterSubjects)
 
 	if sub.DeliverPolicy == jetstream.DeliverByStartTimePolicy {
 		sub.OptStartTime = s.GetOptStartTime().AsTime()
@@ -224,17 +292,24 @@ func (s *state) sourceCalculateAcceptCount(key SourceSubscriptionKey, isReset bo
 		}
 	}
 
-	pendingMessages := s.sourceOutgoing[key.TargetDeployment][key]
-
 	count := settings.MaxPendingAcksPrSubscription
 	if !isReset {
-		count -= len(pendingMessages)
+		count -= len(s.sourceOutgoing[key.TargetDeployment][key])
 		count -= pendingAckCount
 	}
 
-	if count < 0 {
-		count = 0
+	return count
+}
+
+// keep messages from the sequence number
+// The sequence number must be in the list
+func keepMessagesFrom(from uint64, messages []*v1.Msg) []*v1.Msg {
+	idx, found := slices.BinarySearchFunc(messages, from, func(msg *v1.Msg, seq uint64) int {
+		return cmp.Compare(msg.GetSequence(), seq)
+	})
+	if !found {
+		return nil
 	}
 
-	return count
+	return messages[idx:]
 }

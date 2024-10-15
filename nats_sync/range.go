@@ -40,6 +40,14 @@ func (lhs RangeInclusive[T]) Overlaps(rhs RangeInclusive[T]) bool {
 	return true
 }
 
+// expand the range to include the 'rhs' range. New From is the minimum of the two ranges,
+// and the new To is the maximum of the two ranges
+func (lhs RangeInclusive[T]) Expand(rhs RangeInclusive[T]) RangeInclusive[T] {
+	return RangeInclusive[T]{
+		From: min(lhs.From, rhs.From),
+		To:   max(lhs.To, rhs.To)}
+}
+
 // returns a new range using the lhs 'From', but the maximum 'To' of the two ranges
 func (lhs RangeInclusive[T]) MaxTo(rhs RangeInclusive[T]) RangeInclusive[T] {
 	return RangeInclusive[T]{
@@ -52,4 +60,39 @@ func max[T cmp.Ordered](a, b T) T {
 		return a
 	}
 	return b
+}
+
+// find lowest consecutive range. Merge overlapping ranges
+// From and To must match (not just overlap)
+func FindLowestConsecutiveRange[T cmp.Ordered](ranges []RangeInclusive[T]) RangeInclusive[T] {
+	if len(ranges) == 0 {
+		return RangeInclusive[T]{}
+	}
+
+	// find range with minimum From
+	minRange := ranges[0]
+	for _, r := range ranges {
+		if r.From < minRange.From {
+			minRange = r
+		}
+	}
+
+	// merge overlapping ranges
+	for {
+		// may need multiple passes. Stop if no changes
+		found := false
+		for _, r := range ranges {
+			if minRange.To == r.From {
+				minRange.To = r.To
+				found = true
+				break
+			}
+		}
+
+		if !found {
+			break
+		}
+	}
+
+	return minRange
 }

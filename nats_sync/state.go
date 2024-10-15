@@ -27,27 +27,41 @@ var (
 
 /* TODO:
 guarantee that messages are delivered in order
-[ ] at target, send nak if sequence range is before last sequence persisted (to fast forward source)
-[ ] at target, send nak if sequence range is after last sequence (to restart source subscription)
-[ ] at source, handle nak by restarting subscription
-[ ] at target, do not accept batches with overlapping sequences (because it is impossible to keep 'Count')
-[ ] at source, do not accept ack of batches with overlapping sequences (because it is impossible to keep 'Count')
+[x] at target, send nak if Msgs is rejected (because it is out of sequence with target)
+[x] at source, handle nak by restarting subscription
+[x] at source, do not restart subscription again if a nak is received and ack is pending for a Msgs which
+	  contains the requested sequence range.
+[-] at target, do not accept batches with overlapping sequences (because it is impossible to keep 'Count')
+[-] at source, do not accept ack of batches with overlapping sequences (because it is impossible to keep 'Count')
+[x] initial source window start sequence (which could be persisted to improve startup)
 
-backoff:
+backpressure:
 [x] at source, do not accept new messages if there are too many pending messages (MaxPendingAcksPrSubscription)
-[x] at source, accept a partial batch of messages if limit has not been reached, and then backoff
+[x] at source, accept a partial batch of messages if limit has not been reached, and then apply backpressure
 [x] at target, do not accept incoming messages if there are too many pending messages (MaxPendingIncomingMessagesPrSubscription)
 
 ack timeout:
-[ ] at source, if ack is not received within AckTimeout, resend Msgs again (with the same SetID)
+[x] at source, if ack is not received within AckTimeout, resend Msgs again (with the same SetID)
 
 heartbeat:
-[ ] at source, add empty Msgs to the batch if no messages have been sent for a subscription
-  within HeartbeatIntervalPrSubscription
+[x] at source, add empty Msgs to the batch if no activity for a subscription within HeartbeatIntervalPrSubscription
+	  No activity means:
+		* no messages have been sent
+		* no messages have been resent
+		* no pending acks
+		* but some messages must have been sent before (to initialize the window)
 [ ] at target, accept empty Msgs and send Acknowledge
 
 flush:
 [ ] at source, with pending messages/acks pr target, indicate the earliest time messages/acks should be sent to the target
+
+short circuit:
+[ ] at source, if no acknowledgements are received for all streams per deployment, stop resending messages,
+	  only 'heartbeats'. How to "back-on"?
+
+fault scenarios:
+[ ] at source, subscription is continuously restarted, all pendings acks are deleted and a new batch is sent
+	  again and again. Can this happen? How to detect?
 */
 
 // to manage internal state of sync.
@@ -69,22 +83,23 @@ type state struct {
 	// original source subscription, needed when subscription is restarted
 	sourceOriginalSubscription map[SourceSubscriptionKey]SourceSubscription
 
-	// requested local subscription
-	SourceLocalSubscriptions map[SourceSubscriptionKey]SourceSubscription
-
 	// -- fields for target --
 
 	targetCommit map[TargetSubscriptionKey]*TargetCommitWindow
 
 	// target incoming per source deployment
-	// Ordered by sequence From
+	// Ordered by sequence From. Do not modify, use TargetCommit/TargetCommitReject
 	TargetIncoming map[TargetSubscriptionKey][]*v1.Msgs
 
 	// target subscription
 	targetSubscription map[TargetSubscriptionKey]TargetSubscription
 }
 
-func newState(d gateway.Deployment, cs map[gateway.Deployment]CommunicationSettings) (*state, error) {
+// new state for deployment, settings and initial source sequences
+// The deployment may be a source and/or target for streams
+// The initialSourceSequences is optional and specify the last sequence number acknowledged for each source stream
+func newState(d gateway.Deployment, cs map[gateway.Deployment]CommunicationSettings,
+	initialSourceSequences map[SourceSubscriptionKey]uint64) (*state, error) {
 	s := &state{
 		deployment: d,
 		cs:         cs,
@@ -92,10 +107,14 @@ func newState(d gateway.Deployment, cs map[gateway.Deployment]CommunicationSetti
 		sourceOriginalSubscription: make(map[SourceSubscriptionKey]SourceSubscription),
 		sourceAckWindows:           make(map[SourceSubscriptionKey]*SourcePendingWindow),
 		sourceOutgoing:             make(map[gateway.Deployment]map[SourceSubscriptionKey][]*v1.Msg),
-		SourceLocalSubscriptions:   make(map[SourceSubscriptionKey]SourceSubscription),
 		targetCommit:               make(map[TargetSubscriptionKey]*TargetCommitWindow),
 		TargetIncoming:             make(map[TargetSubscriptionKey][]*v1.Msgs),
 		targetSubscription:         make(map[TargetSubscriptionKey]TargetSubscription)}
+
+	for sub, seq := range initialSourceSequences {
+		s.sourceAckWindows[sub] = &SourcePendingWindow{
+			Extrema: RangeInclusive[uint64]{From: seq, To: seq}}
+	}
 
 	return s, s.Validate()
 }
@@ -116,13 +135,21 @@ func (s *state) RegisterSubscription(req *v1.StartSyncRequest) error {
 			gateway.Deployment(req.GetTargetDeployment()),
 			req.GetSourceStreamName(),
 			req.GetConsumerConfig(), req.GetFilterSubjects())
-		// keep the original subscription
-		s.sourceOriginalSubscription[sub.SourceSubscriptionKey] = sub
 
-		subLocal := sub
-		// be optimistic that the target has the most recent message
-		subLocal.DeliverPolicy = jetstream.DeliverLastPolicy
-		s.SourceLocalSubscriptions[sub.SourceSubscriptionKey] = subLocal
+		if _, exists := s.sourceOriginalSubscription[sub.SourceSubscriptionKey]; exists {
+			return errors.New("subscription already exists")
+		}
+
+		// keep the original subscription
+		s.sourceOriginalSubscription[sub.SourceSubscriptionKey] = sub.Clone()
+
+		// check if a initial pending ack window exists
+		if w, exists := s.sourceAckWindows[sub.SourceSubscriptionKey]; exists {
+			if w.Extrema.From > 0 {
+				sub.DeliverPolicy = jetstream.DeliverByStartSequencePolicy
+				sub.OptStartSeq = w.Extrema.From
+			}
+		}
 		return nil
 	}
 
@@ -130,6 +157,9 @@ func (s *state) RegisterSubscription(req *v1.StartSyncRequest) error {
 		key := TargetSubscriptionKey{
 			SourceDeployment: gateway.Deployment(req.GetSourceDeployment()),
 			SourceStreamName: req.GetSourceStreamName()}
+		if _, exists := s.targetSubscription[key]; exists {
+			return errors.New("subscription already exists")
+		}
 
 		sub := TargetSubscription{
 			TargetSubscriptionKey: key,
@@ -157,17 +187,15 @@ func (s *state) UnregisterSubscription(req *v1.StopSyncRequest) error {
 // This will not delete the messages from the outgoing queue (you must call MarkDispatched)
 // You should call MarkDispatched after sending the batch to the target deployment.
 // If you call CreateMessageBatch again before a succesful MarkDispatched, the same messages will be included (and more, if some messages have been delivered via SourceDeliverFromLocal)
-func (s *state) CreateMessageBatch(t time.Time, to gateway.Deployment) (*v1.MessageBatch, error) {
+func (s *state) CreateMessageBatch(now time.Time, to gateway.Deployment) (*v1.MessageBatch, error) {
 	m := &v1.MessageBatch{
 		ToDeployment:   to.String(),
 		FromDeployment: s.deployment.String(),
-		SentTimestamp:  timestamppb.New(t.UTC())}
+		SentTimestamp:  timestamppb.New(now.UTC())}
 
 	for key := range s.sourceOutgoing[to] {
 		b := s.packMessages(key)
-		if b != nil {
-			m.ListOfMessages = append(m.ListOfMessages, b)
-		}
+		m.ListOfMessages = append(m.ListOfMessages, b...)
 	}
 
 	for _, w := range s.targetCommit {
@@ -176,15 +204,42 @@ func (s *state) CreateMessageBatch(t time.Time, to gateway.Deployment) (*v1.Mess
 		}
 	}
 
+	settings := s.cs[to]
+	for key, w := range s.sourceAckWindows {
+		if key.TargetDeployment != to {
+			continue
+		}
+
+		ids := w.GetRetransmit(now, settings.AckTimeoutPrSubscription, settings.AckRetryPrSubscription)
+		m.ListOfMessages = append(m.ListOfMessages, s.repackMessages(key, ids)...)
+
+		if !w.ShouldSentHeartbeat(now, settings.HeartbeatIntervalPrSubscription) {
+			continue
+		}
+
+		sub, exists := s.sourceOriginalSubscription[key]
+		if !exists {
+			panic("no subscription")
+		}
+
+		m.ListOfMessages = append(m.ListOfMessages, &v1.Msgs{
+			SetId:            NewSetID().String(),
+			SourceDeployment: s.deployment.String(),
+			TargetDeployment: to.String(),
+			SourceStreamName: key.SourceStreamName,
+			LastSequence:     w.Extrema.To,
+			ConsumerConfig:   fromSourceSubscription(sub)})
+	}
+
 	if len(m.ListOfMessages) == 0 && len(m.Acknowledges) == 0 {
 		return nil, nil
 	}
 	return m, nil
 }
 
-// pending stats for target deployment
-// returns [number of messages, number of acks]
-func (s *state) PendingStats(to gateway.Deployment) []int {
+// pending stats for target deployment evaluated at 'now'
+// returns [number of messages (including re-transmit), number of pending acks]
+func (s *state) PendingStats(now time.Time, to gateway.Deployment) []int {
 	var nm, na int
 
 	for key := range s.sourceOutgoing[to] {
@@ -193,6 +248,19 @@ func (s *state) PendingStats(to gateway.Deployment) []int {
 
 	for _, w := range s.targetCommit {
 		na += len(w.PendingAcks)
+	}
+
+	for key, w := range s.sourceAckWindows {
+		if key.TargetDeployment != to {
+			continue
+		}
+
+		settings := s.cs[key.TargetDeployment]
+		nm += len(w.GetRetransmit(now, settings.AckTimeoutPrSubscription, settings.AckRetryPrSubscription))
+
+		if w.ShouldSentHeartbeat(now, settings.HeartbeatIntervalPrSubscription) {
+			nm++
+		}
 	}
 
 	return []int{nm, na}
@@ -342,17 +410,6 @@ func FromDeliverPolicy(p jetstream.DeliverPolicy) v1.DeliverPolicy {
 	default:
 		panic("unknown deliver policy")
 	}
-}
-
-func fromUnixTime(seconds float64) time.Time {
-	if seconds == 0 {
-		return time.Time{}
-	}
-	return time.Unix(0, int64(seconds*1e9))
-}
-
-func toUnixTime(t time.Time) float64 {
-	return float64(t.UnixNano()) / 1e9
 }
 
 // compare messages by source sequence (only!)

@@ -86,13 +86,13 @@ func (c NatsSyncConfig) Validate() error {
 type CommunicationSettings struct {
 	// --- settings pr subscription ---
 
-	// timeout waiting for ack, before resending from the lowest source sequence
-	// received for the relevant subscription OR restarting the subscription if the lowest
-	// source sequence is not available.
+	// timeout waiting for ack. Matching Msgs (based on SetID) will be resent.
 	AckTimeoutPrSubscription time.Duration
 
+	AckRetryPrSubscription retry.Retryer
+
 	// backoff strategy for retrying when nak is received or ack is not received within timeout
-	NakBackoffPrSubscription retry.Retryer
+	//NakBackoffPrSubscription retry.Retryer
 
 	// interval to wait for more messages for the same subscription before sending them in a batch
 	// should be much lower than AckTimeout
@@ -115,7 +115,8 @@ type CommunicationSettings struct {
 
 	// -- settings across all subscriptions --
 
-	// max accumulated payload size in bytes for a MessageExchange message
+	// max accumulated payload size in bytes for a MessageExchange message.
+	// Must be able to hold at least one message
 	MaxAccumulatedPayloadSizeBytes int
 }
 
@@ -123,17 +124,29 @@ func (s CommunicationSettings) Validate() error {
 	if s.AckTimeoutPrSubscription < time.Millisecond {
 		return errors.New("AckTimeoutPrSubscription must be at least 1 ms")
 	}
-	if s.NakBackoffPrSubscription == nil {
-		return errors.New("NakBackoffPrSubscription empty")
+	if s.AckRetryPrSubscription == nil {
+		return errors.New("AckRetryPrSubscription empty")
 	}
-	if s.NakBackoffPrSubscription.MaxDuration() < time.Millisecond {
-		return errors.New("NakBackoffPrSubscription must be at least 1 ms")
+	if s.AckRetryPrSubscription.MaxDuration() < time.Millisecond {
+		return errors.New("AckRetryPrSubscription must be at least 1 ms")
 	}
+	if s.AckRetryPrSubscription.MaxDuration() < s.AckTimeoutPrSubscription {
+		return errors.New("AckRetryPrSubscription MaxDuration must be at least AckTimeoutPrSubscription")
+	}
+	// if s.NakBackoffPrSubscription == nil {
+	// 	return errors.New("NakBackoffPrSubscription empty")
+	// }
+	// if s.NakBackoffPrSubscription.MaxDuration() < time.Millisecond {
+	// 	return errors.New("NakBackoffPrSubscription must be at least 1 ms")
+	// }
 	if s.FlushIntervalPrSubscription >= s.AckTimeoutPrSubscription {
 		return errors.New("FlushIntervalPrSubscription must be less than AckTimeoutPrSubscription")
 	}
 	if s.HeartbeatIntervalPrSubscription < time.Millisecond {
 		return errors.New("HeartbeatIntervalPrSubscription must be at least 1 ms")
+	}
+	if s.HeartbeatIntervalPrSubscription < 10*s.AckTimeoutPrSubscription {
+		return errors.New("HeartbeatIntervalPrSubscription must be at least 10 times AckTimeoutPrSubscription")
 	}
 	if s.MaxPendingAcksPrSubscription <= 0 {
 		return errors.New("MaxPendingAcksPrSubscription must be positive")

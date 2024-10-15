@@ -71,7 +71,7 @@ func TestNatsSyncLowLevelSync(t *testing.T) {
 
 	defaultCommSettings := CommunicationSettings{
 		AckTimeoutPrSubscription:        time.Second,
-		NakBackoffPrSubscription:        retry.Must(retry.NewExp(0.2, 10*time.Millisecond, 500*time.Millisecond)),
+		AckRetryPrSubscription:          retry.Must(retry.NewExp(0.2, 10*time.Millisecond, 500*time.Millisecond)),
 		FlushIntervalPrSubscription:     10 * time.Millisecond,
 		HeartbeatIntervalPrSubscription: 100 * time.Millisecond,
 		MaxAccumulatedPayloadSizeBytes:  4 << 20, // 4 MB

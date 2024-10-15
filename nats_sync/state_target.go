@@ -2,6 +2,7 @@ package nats_sync
 
 import (
 	"cmp"
+	"fmt"
 	"slices"
 	"time"
 
@@ -12,6 +13,7 @@ import (
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
+// target deliver messages from remote to internal buffer (in-memory), waiting to be committed
 func (s *state) TargetDeliverFromRemote(t time.Time, msgs *v1.Msgs) error {
 	sub := getTargetSubscription(msgs)
 	key := sub.TargetSubscriptionKey
@@ -106,6 +108,55 @@ func (s *state) TargetCommit(msgs *v1.Msgs) error {
 	return errors.New("set not found")
 }
 
+// reject a set of incoming messages
+// A NAK (not-acknowledge) will be sent back to the source, indicating how
+// the sync should be restarted.
+// If lastSequence>0, the source should restart from lastSequence
+// If lastSequence=0, the source should restart the subscription
+func (s *state) TargetCommitReject(msgs *v1.Msgs, lastSequence uint64) error {
+	sub := getTargetSubscription(msgs)
+	key := sub.TargetSubscriptionKey
+
+	for idx, pendingMsgs := range s.TargetIncoming[key] {
+		if pendingMsgs.GetSetId() != msgs.GetSetId() {
+			continue
+		}
+
+		seq := RangeInclusive[uint64]{
+			From: pendingMsgs.GetLastSequence(),
+			To:   pendingMsgs.GetLastSequence()}
+
+		if len(pendingMsgs.GetMessages()) > 0 {
+			seq.To = pendingMsgs.GetMessages()[len(pendingMsgs.GetMessages())-1].GetSequence()
+		}
+		if seq.From > seq.To {
+			return errors.New("invalid message range")
+		}
+
+		ack := &v1.Acknowledge{
+			SetId:            msgs.GetSetId(),
+			SourceStreamName: msgs.GetSourceStreamName(),
+			SequenceFrom:     lastSequence,
+			IsNak:            true,
+			Reason:           fmt.Sprintf("target rejected range %s, request restart (lastSequence %d)", seq.String(), lastSequence)}
+
+		if _, exists := s.targetCommit[key]; !exists {
+			s.targetCommit[key] = &TargetCommitWindow{}
+		}
+
+		s.targetCommit[key].Commit(ack)
+
+		s.TargetIncoming[key] = slices.Delete(s.TargetIncoming[key], idx, idx+1)
+		if len(s.TargetIncoming[key]) == 0 {
+			delete(s.TargetIncoming, key)
+		}
+
+		return nil
+	}
+
+	return errors.New("matching set ID not found")
+}
+
 type TargetSubscriptionKey struct {
 	SourceDeployment gateway.Deployment
 	SourceStreamName string
@@ -140,6 +191,7 @@ func getTargetSubscription(msgs *v1.Msgs) TargetSubscription {
 		DeliverPolicy:    ToDeliverPolicy(cc.GetDeliverPolicy()),
 		OptStartSeq:      cc.GetOptStartSeq(),
 		FilterSubjects:   msgs.GetFilterSubjects()}
+	slices.Sort(sub.FilterSubjects)
 
 	if sub.DeliverPolicy == jetstream.DeliverByStartTimePolicy {
 		sub.OptStartTime = cc.GetOptStartTime().AsTime()
@@ -155,9 +207,8 @@ func fromTargetSubscription(sub TargetSubscription) *v1.ConsumerConfig {
 }
 
 type TargetCommitWindow struct {
-	// extrama, where From is the lowest sequence number received and To is the highest
-	//ReceivedExtrema RangeInclusive[uint64]
-
+	// extrama, where From is the lowest sequence number committed and To is the highest
+	// received, but not yet committed
 	CommittedExtrema RangeInclusive[uint64]
 
 	// pending acks per source deployment (which is the intended destination).
@@ -171,13 +222,19 @@ type TargetCommitWindow struct {
 	//LowestCommitted uint64
 }
 
-// commit ack (assuming the matching window has been picked)
+// commit ack/nak (assuming the matching window has been picked)
 func (w *TargetCommitWindow) Commit(ack *v1.Acknowledge) {
 	if w.PendingAcks == nil {
 		w.PendingAcks = make(map[SetID]*v1.Acknowledge)
 	}
 	id := SetID(ack.GetSetId())
 	w.PendingAcks[id] = ack
+
+	if ack.IsNak {
+		w.CommittedExtrema = RangeInclusive[uint64]{
+			From: ack.GetSequenceFrom(),
+			To:   ack.GetSequenceFrom()}
+	}
 }
 
 func cmpMsgsSequence(a, b *v1.Msgs) int {

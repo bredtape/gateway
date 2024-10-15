@@ -5,22 +5,29 @@ import (
 	"time"
 
 	v1 "github.com/bredtape/gateway/nats_sync/v1"
+	"github.com/bredtape/retry"
 	"github.com/pkg/errors"
 )
 
 // pending per subscription
 type SourcePendingWindow struct {
-	// min From (inclusive) and max To (inclusive) pending
-	// if Acknowledged is empty, From and To are equal
+	// min Acknowledge From (inclusive) and max Pending To (inclusive)
 	Extrema RangeInclusive[uint64]
 
 	// pending acks
 	Pending map[SetID]SourcePendingAck
 
+	// number of times pending acks have timed out and retried
+	// Reset when successful ack is received
+	PendingRetries int
+
 	// acknowledged acks, but not contiguous with the Extrema,
 	// i.e. some acks are missing in-between.
 	// Ordered by SequenceRange.From
 	Acknowledged []SourcePendingAck
+
+	// last activity time. Updated when messages are dispatched/retried and ack's received
+	LastActivity time.Time
 }
 
 // mark batch dispatched.
@@ -28,13 +35,8 @@ type SourcePendingWindow struct {
 // all pending acks will be removed.
 // Otherwise, the pending sequence must start at Extrema.To
 func (w *SourcePendingWindow) MarkDispatched(pending SourcePendingAck) error {
-
 	if w.Extrema.From > pending.SequenceRange.From {
 		return errors.New("sequence range mismatch")
-	}
-
-	if len(w.Acknowledged) > 0 {
-		return errors.New("not implemented, acks")
 	}
 
 	if pending.SequenceRange.From == 0 {
@@ -59,40 +61,97 @@ func (w *SourcePendingWindow) MarkDispatched(pending SourcePendingAck) error {
 			pending.SequenceRange.String(), w.Extrema.String())
 	}
 
+	// only checks before this point
+
 	if w.Pending == nil {
 		w.Pending = make(map[SetID]SourcePendingAck)
 	}
 
+	// this is a retransmit, increment retries
+	if _, exists := w.Pending[pending.SetID]; exists {
+		w.PendingRetries++
+	}
+
 	w.Pending[pending.SetID] = pending
 	w.Extrema = w.Extrema.MaxTo(pending.SequenceRange)
+	w.LastActivity = maxTime(w.LastActivity, pending.SentTimestamp)
 
 	return nil
 }
 
-func (w *SourcePendingWindow) ReceiveAck(ack SourcePendingAck) (bool, error) {
+func (w *SourcePendingWindow) ReceiveAck(received time.Time, ack SourcePendingAck) error {
 	p, exists := w.Pending[ack.SetID]
 	if !exists {
 		// ack is not pending, ignore
-		return false, nil
+		return nil
 	}
 
 	delete(w.Pending, ack.SetID)
-	w.Acknowledged = append(w.Acknowledged, p)
-	slices.SortFunc(w.Acknowledged, cmpPendingAckSequence)
 
-	count := len(w.Acknowledged)
-	for i, ack := range w.Acknowledged {
-		if ack.SequenceRange.From == w.Extrema.From {
-			w.Acknowledged = slices.Delete(w.Acknowledged, i, i+1)
-			w.Extrema.From = ack.SequenceRange.To
+	w.LastActivity = maxTime(w.LastActivity, received)
+
+	if ack.IsNAK {
+		from := ack.SequenceRange.From
+		w.Extrema = RangeInclusive[uint64]{From: from, To: from}
+		pendings, to := w.getConsecutivePendingStartingFrom(from)
+
+		w.Pending = pendings
+		w.Extrema.To = to
+		w.Acknowledged = nil
+
+		return nil
+
+	} else {
+		w.PendingRetries = 0
+		w.Acknowledged = append(w.Acknowledged, p)
+		slices.SortFunc(w.Acknowledged, cmpPendingAckSequence)
+
+		for i, ack := range w.Acknowledged {
+			if ack.SequenceRange.From == w.Extrema.From {
+				w.Acknowledged = slices.Delete(w.Acknowledged, i, i+1)
+				w.Extrema.From = ack.SequenceRange.To
+			}
 		}
-	}
 
-	return len(w.Acknowledged) < count, nil
+		return nil
+	}
+}
+
+// get pending acks that should be retransmitted
+func (w *SourcePendingWindow) GetRetransmit(now time.Time, ackTimeoutDuration time.Duration, backoff retry.Retryer) []SetID {
+	timeout := now.Add(-ackTimeoutDuration)
+
+	var result []SetID
+	for _, pending := range w.Pending {
+		if pending.SentTimestamp.After(timeout) {
+			continue
+		}
+
+		retryWhen := now.Add(-backoff.Next(w.PendingRetries))
+		if pending.SentTimestamp.After(retryWhen) {
+			continue
+		}
+		result = append(result, pending.SetID)
+	}
+	return result
+}
+
+func (w *SourcePendingWindow) ShouldSentHeartbeat(now time.Time, heartbeatInterval time.Duration) bool {
+	if len(w.Pending) > 0 {
+		return false
+	}
+	if w.LastActivity.IsZero() {
+		return false
+	}
+	if w.LastActivity.After(now.Add(-heartbeatInterval)) {
+		return false
+	}
+	return true
 }
 
 type SourcePendingAck struct {
 	SetID         SetID
+	IsNAK         bool
 	SentTimestamp time.Time
 	SequenceRange RangeInclusive[uint64]
 	Messages      []*v1.Msg
@@ -107,4 +166,42 @@ func cmpPendingAckSequence(a, b SourcePendingAck) int {
 		return 1
 	}
 	return 0
+}
+
+func (w SourcePendingWindow) getPendingRanges() []RangeInclusive[uint64] {
+	ranges := make([]RangeInclusive[uint64], 0, len(w.Pending))
+	for _, p := range w.Pending {
+		ranges = append(ranges, p.SequenceRange)
+	}
+	return ranges
+}
+
+func (w SourcePendingWindow) getConsecutivePendingStartingFrom(from uint64) (map[SetID]SourcePendingAck, uint64) {
+	pendings := make(map[SetID]SourcePendingAck, 0)
+	max := from
+
+	r := RangeInclusive[uint64]{From: from, To: from}
+	for {
+		changes := false
+
+		for _, p := range w.Pending {
+			if r.To == p.SequenceRange.From {
+				r = r.Expand(p.SequenceRange)
+				max = r.To
+				pendings[p.SetID] = p
+				changes = true
+			}
+		}
+		if !changes {
+			break
+		}
+	}
+	return pendings, max
+}
+
+func maxTime(time1, time2 time.Time) time.Time {
+	if time1.After(time2) {
+		return time1
+	}
+	return time2
 }
