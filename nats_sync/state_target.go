@@ -49,6 +49,9 @@ func (s *state) TargetDeliverFromRemote(t time.Time, msgs *v1.Msgs) error {
 	// (not checking that message sequence aligns here, since messages can be received out of order)
 	s.TargetIncoming[key] = append(s.TargetIncoming[key], msgs)
 
+	// order by last sequence
+	slices.SortFunc(s.TargetIncoming[key], cmpMsgsSequence)
+
 	return nil
 }
 
@@ -237,6 +240,7 @@ func (w *TargetCommitWindow) Commit(ack *v1.Acknowledge) {
 	}
 }
 
+// comparer for *v1.Msgs, comparing the last sequence number
 func cmpMsgsSequence(a, b *v1.Msgs) int {
 	return cmp.Compare(a.GetLastSequence(), b.GetLastSequence())
 }

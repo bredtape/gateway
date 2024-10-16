@@ -106,7 +106,8 @@ type CommunicationSettings struct {
 	MaxPendingAcksPrSubscription int
 
 	// the maximum number of messages buffered at the target, waiting to be persisted.
-	// Must be at least MaxPendingAcksPrSubscription
+	// Must be at least MaxPendingAcksPrSubscription, but should be much higher (because if
+	// messages arrive out-of-order, they must all be NAK'ed unless there is room for them)
 	MaxPendingIncomingMessagesPrSubscription int
 
 	// -- settings across all subscriptions --

@@ -72,6 +72,10 @@ func TestStateTargetBasic(t *testing.T) {
 				err := s.TargetDeliverFromRemote(t0, msgs1)
 				So(err, ShouldBeNil)
 
+				Convey("should have incoming", func() {
+					So(s.TargetIncoming[key], ShouldHaveLength, 1)
+				})
+
 				Convey("commit set ID", func() {
 					err := s.TargetCommit(msgs1)
 					So(err, ShouldBeNil)
@@ -111,6 +115,46 @@ func TestStateTargetBasic(t *testing.T) {
 								So(err, ShouldBeNil)
 								So(b, ShouldBeNil)
 							})
+						})
+					})
+
+					Convey("deliver 2nd msg for stream1", func() {
+						msgs2 := &v1.Msgs{
+							SetId:            NewSetID().String(),
+							SourceDeployment: "xx",
+							TargetDeployment: "yy",
+							SourceStreamName: "stream1",
+							ConsumerConfig:   &v1.ConsumerConfig{DeliverPolicy: v1.DeliverPolicy_DELIVER_POLICY_ALL},
+							LastSequence:     2,
+							Messages:         []*v1.Msg{msg2}}
+
+						t1 := time.Now()
+						err := s.TargetDeliverFromRemote(t1, msgs2)
+						So(err, ShouldBeNil)
+
+						Convey("should have incoming", func() {
+							So(s.TargetIncoming[key], ShouldHaveLength, 1)
+							So(s.TargetIncoming[key][0].Messages, ShouldHaveLength, 1)
+						})
+					})
+
+					Convey("deliver 2nd msg, empty", func() {
+						msgs2 := &v1.Msgs{
+							SetId:            NewSetID().String(),
+							SourceDeployment: "xx",
+							TargetDeployment: "yy",
+							SourceStreamName: "stream1",
+							ConsumerConfig:   &v1.ConsumerConfig{DeliverPolicy: v1.DeliverPolicy_DELIVER_POLICY_ALL},
+							LastSequence:     2,
+							Messages:         nil}
+
+						t1 := time.Now()
+						err := s.TargetDeliverFromRemote(t1, msgs2)
+						So(err, ShouldBeNil)
+
+						Convey("should have incoming, but empty", func() {
+							So(s.TargetIncoming[key], ShouldHaveLength, 1)
+							So(s.TargetIncoming[key][0].Messages, ShouldBeEmpty)
 						})
 					})
 				})

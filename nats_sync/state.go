@@ -51,7 +51,7 @@ heartbeat:
 		* no messages have been resent
 		* no pending acks
 		* but some messages must have been sent before (to initialize the window)
-[ ] at target, accept empty Msgs and send Acknowledge
+[x] at target, accept empty Msgs and send Acknowledge
 
 max size:
 [x] at source, do not send batches that exceed MaxAccumulatedPayloadSizeBytes
