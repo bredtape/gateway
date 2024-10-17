@@ -66,6 +66,9 @@ short circuit:
 fault scenarios:
 [?] at source, subscription is continuously restarted, all pendings acks are deleted and a new batch is sent
 	  again and again. Can this happen? How to detect?
+[?] source have subscription registered, but not target. Target keep replying with NAK, source keeps
+    restarting. Instrument with metrics and define alert to detect this scenario.
+
 */
 
 // to manage internal state of sync.
@@ -123,14 +126,14 @@ func newState(d gateway.Deployment, cs map[gateway.Deployment]CommunicationSetti
 	return s, s.Validate()
 }
 
-// Notes:
-// Do not remember remote sequence, but simply restart subscription on startup,
-// and then maybe fast-forward based on lowest_source_sequence_received
-
 // register subscription. If this deployment matches the source a LocalSubscriptions entry
 // will be present. If this deployment matches the target, messages are expected
 // to arrive and will then be published to the (local) target stream.
 func (s *state) RegisterSubscription(req *v1.StartSyncRequest) error {
+	if req.GetSourceDeployment() == req.GetTargetDeployment() {
+		return errors.New("source and target deployment must be different")
+	}
+
 	isSource := req.GetSourceDeployment() == s.deployment.String()
 	isTarget := req.GetTargetDeployment() == s.deployment.String()
 
@@ -180,11 +183,43 @@ func (s *state) RegisterSubscription(req *v1.StartSyncRequest) error {
 	}
 
 	return errors.New("neither source nor target")
-
 }
 
 func (s *state) UnregisterSubscription(req *v1.StopSyncRequest) error {
-	return errors.New("not implemented")
+	if req.GetSourceDeployment() == req.GetTargetDeployment() {
+		return errors.New("source and target deployment must be different")
+	}
+
+	isSource := req.GetSourceDeployment() == s.deployment.String()
+	isTarget := req.GetTargetDeployment() == s.deployment.String()
+
+	if isSource {
+		key := SourceSubscriptionKey{
+			TargetDeployment: gateway.Deployment(req.GetTargetDeployment()),
+			SourceStreamName: req.GetSourceStreamName()}
+
+		delete(s.sourceOriginalSubscription, key)
+		delete(s.sourceAckWindows, key)
+		delete(s.sourceOutgoing[key.TargetDeployment], key)
+		if len(s.sourceOutgoing[key.TargetDeployment]) == 0 {
+			delete(s.sourceOutgoing, key.TargetDeployment)
+		}
+		return nil
+	}
+
+	if isTarget {
+		key := TargetSubscriptionKey{
+			SourceDeployment: gateway.Deployment(req.GetSourceDeployment()),
+			SourceStreamName: req.GetSourceStreamName()}
+
+		delete(s.targetSubscription, key)
+		delete(s.targetCommit, key)
+		delete(s.TargetIncoming, key)
+
+		return nil
+	}
+
+	return errors.New("neither source nor target")
 }
 
 // create batch of messages and acks queued for 'to' deployment. Returns nil if no messages are queued

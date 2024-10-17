@@ -12,6 +12,14 @@ import (
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
+func (s *state) GetSourceLocalSubscriptionKeys() []SourceSubscriptionKey {
+	keys := make([]SourceSubscriptionKey, 0, len(s.sourceOriginalSubscription))
+	for k := range s.sourceOriginalSubscription {
+		keys = append(keys, k)
+	}
+	return keys
+}
+
 // requested local subscription (may be different from original subscription)
 func (s *state) GetSourceLocalSubscriptions(key SourceSubscriptionKey) (SourceSubscription, bool) {
 	sub, exists := s.sourceOriginalSubscription[key]
@@ -30,6 +38,12 @@ func (s *state) GetSourceLocalSubscriptions(key SourceSubscriptionKey) (SourceSu
 	}
 
 	return sub.Clone(), true
+}
+
+type SourceLocalMessages struct {
+	SourceSubscriptionKey
+	LastSequence uint64
+	Messages     []*v1.Msg
 }
 
 // deliver local messages from requested subscriptions (to be sent to remote)

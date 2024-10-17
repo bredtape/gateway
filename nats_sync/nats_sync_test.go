@@ -86,14 +86,14 @@ func TestNatsSyncLowLevelSync(t *testing.T) {
 		cs := defaultCommSettings
 		config := NatsSyncConfig{
 			Deployment:            da,
-			SubscriptionStream:    generateRandomString() + "subscription",
+			SyncStream:            generateRandomString() + "subscription",
 			CommunicationSettings: map[gateway.Deployment]CommunicationSettings{db: cs},
 			Exchanges:             map[gateway.Deployment]Exchange{db: ex}}
 		sync, err := StartNatsSync(ctx, js, config)
 		assert.NoError(t, err)
 		syncA = sync
 
-		s, err := sync.CreateSubscriptionStream(ctx)
+		s, err := sync.CreateSyncStream(ctx)
 		assert.NoError(t, err)
 
 		info, err := s.Info(ctx)
@@ -113,14 +113,14 @@ func TestNatsSyncLowLevelSync(t *testing.T) {
 		cs := defaultCommSettings
 		config := NatsSyncConfig{
 			Deployment:            db,
-			SubscriptionStream:    generateRandomString() + "subscription",
+			SyncStream:            generateRandomString() + "subscription",
 			CommunicationSettings: map[gateway.Deployment]CommunicationSettings{da: cs},
 			Exchanges:             map[gateway.Deployment]Exchange{da: ex}}
 		sync, err := StartNatsSync(ctx, js, config)
 		assert.NoError(t, err)
 		syncB = sync
 
-		s, err := sync.CreateSubscriptionStream(ctx)
+		s, err := sync.CreateSyncStream(ctx)
 		assert.NoError(t, err, "failed to create subscription stream on B")
 
 		info, err := s.Info(ctx)
@@ -130,11 +130,11 @@ func TestNatsSyncLowLevelSync(t *testing.T) {
 
 	// publish subscription directly to each nats-servers, to enable sync of the subscription stream itself
 	{
-		ack, err := syncA.PublishBootstrapSubscription(ctx, da, db)
+		ack, err := syncA.PublishBootstrapSync(ctx, da, db)
 		assert.NoError(t, err)
 		t.Logf("publish bootstrap at A, ack %+v", ack)
 
-		ack, err = syncB.PublishBootstrapSubscription(ctx, da, db)
+		ack, err = syncB.PublishBootstrapSync(ctx, da, db)
 		assert.NoError(t, err)
 		t.Logf("publish bootstrap at B, ack %+v", ack)
 	}
@@ -174,10 +174,10 @@ func TestNatsSyncLowLevelSync(t *testing.T) {
 			TargetDeployment: db.String(),
 			SourceStreamName: appStreamA,
 			TargetStreamName: appStreamB}
-		_, err := syncA.publishSubscribeRequest(ctx, sub)
+		_, err := syncA.publishStartSyncRequest(ctx, sub)
 		assert.NoError(t, err)
 
-		_, err = syncB.publishSubscribeRequest(ctx, sub)
+		_, err = syncB.publishStartSyncRequest(ctx, sub)
 		assert.NoError(t, err)
 		t.Logf("requested sync of app stream from A to B")
 	}
@@ -185,7 +185,7 @@ func TestNatsSyncLowLevelSync(t *testing.T) {
 	// publish messages to the "app" stream on A. Use http GetRequest (to have a defined proto message, but different)
 	{
 		req := &rh.GetRequest{Url: "http://something.com"}
-		ack, err := syncA.js.PublishProto(ctx, appStreamA+".something", req, jetstream.WithExpectStream(appStreamA))
+		ack, err := syncA.js.PublishProto(ctx, appStreamA+".something", nil, req, jetstream.WithExpectStream(appStreamA))
 		assert.NoError(t, err)
 		t.Logf("published http request to %s at A", ack.Stream)
 	}

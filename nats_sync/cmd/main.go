@@ -9,7 +9,7 @@ import (
 )
 
 // app name, used for environment and metrics prefix
-const app = "nats_transfer"
+const app = "nats_sync"
 
 type Config struct {
 	NatsURLs string

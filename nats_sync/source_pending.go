@@ -18,7 +18,7 @@ type SourcePendingWindow struct {
 	Pending map[SetID]SourcePendingAck
 
 	// number of times pending acks have timed out and retried
-	// Reset when successful ack is received
+	// Reset, when successful ack is received
 	PendingRetries int
 
 	// acknowledged acks, but not contiguous with the Extrema,

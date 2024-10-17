@@ -3,11 +3,20 @@ package nats_sync
 import (
 	"context"
 	"crypto/tls"
+	"fmt"
+	"log/slog"
+	"time"
 
 	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
 	"github.com/pkg/errors"
 	"google.golang.org/protobuf/proto"
+)
+
+const (
+	contentTypeProto      = "application/grpc+proto"
+	headerContentType     = "content-type"
+	headerGrpcMessageType = "grpc-message-type"
 )
 
 type JSConfig struct {
@@ -51,6 +60,7 @@ func NewJSConn(config JSConfig) *JSConn {
 }
 
 // acquire connection to jetstream. Do not modify returned jetstream reference
+// The context is only used to obtain a connection, not for the connection itself.
 func (c *JSConn) Connect(ctx context.Context) (jetstream.JetStream, error) {
 	// try to acquire lock
 	select {
@@ -94,7 +104,7 @@ func (c *JSConn) Connect(ctx context.Context) (jetstream.JetStream, error) {
 	return *c.js, nil
 }
 
-func (c *JSConn) PublishProto(ctx context.Context, subject string, m proto.Message, opts ...jetstream.PublishOpt) (*jetstream.PubAck, error) {
+func (c *JSConn) PublishProto(ctx context.Context, subject string, headers map[string][]string, m proto.Message, opts ...jetstream.PublishOpt) (*jetstream.PubAck, error) {
 	js, err := c.Connect(ctx)
 	if err != nil {
 		return nil, errors.Wrap(err, "failed to connect to nats")
@@ -105,12 +115,21 @@ func (c *JSConn) PublishProto(ctx context.Context, subject string, m proto.Messa
 		return nil, errors.Wrap(err, "failed to marshal proto message")
 	}
 
+	h := map[string][]string{
+		headerContentType:     {contentTypeProto},
+		headerGrpcMessageType: {string(m.ProtoReflect().Descriptor().FullName())}}
+
+	for k, vs := range headers {
+		if _, exists := h[k]; exists {
+			return nil, fmt.Errorf("header %s already exists", k)
+		}
+		h[k] = vs
+	}
+
 	msg := &nats.Msg{
 		Subject: subject,
-		Header: map[string][]string{
-			"content-type":      {contentTypeProto},
-			"grpc-message-type": {string(m.ProtoReflect().Descriptor().FullName())}},
-		Data: data}
+		Header:  h,
+		Data:    data}
 
 	ack, err := js.PublishMsg(ctx, msg, opts...)
 	if err != nil {
@@ -118,4 +137,99 @@ func (c *JSConn) PublishProto(ctx context.Context, subject string, m proto.Messa
 	}
 
 	return ack, nil
+}
+
+type PublishedMessage struct {
+	Subject            string
+	Sequence           uint64
+	PublishedTimestamp time.Time
+	Headers            map[string][]string
+	Data               []byte
+}
+
+// subscribe to a stream and receive messages in order.
+// To unsubscribe, cancel the context.
+func (c *JSConn) SubscribeOrderered(ctx context.Context, stream string, cfg jetstream.OrderedConsumerConfig) (<-chan WithError[PublishedMessage], error) {
+	log := logWithConsumerConfig(slog.With("module", "nats_sync", "operation", "SubscribeOrderered"), cfg)
+
+	js, err := c.Connect(ctx)
+	if err != nil {
+		return nil, errors.Wrap(err, "failed to connect to nats")
+	}
+
+	consumer, err := js.OrderedConsumer(ctx, stream, cfg)
+	if err != nil {
+		return nil, errors.Wrap(err, "failed to create ordered consumer")
+	}
+
+	ch := make(chan WithError[PublishedMessage])
+	go func() {
+		defer close(ch)
+
+		lastSequence := uint64(0)
+		for {
+			msg, err := consumer.Next(jetstream.FetchHeartbeat(59*time.Second), jetstream.FetchMaxWait(2*time.Minute))
+			if err != nil {
+				if ctx.Err() != nil {
+					return
+				}
+				log.Error("failed to get next message, closing", "err", err)
+				ch <- WithError[PublishedMessage]{Error: err}
+				return
+			}
+
+			meta, err := msg.Metadata()
+			if err != nil {
+				log.Error("failed to get message metadata, closing", "err", err)
+				ch <- WithError[PublishedMessage]{
+					Error: err,
+					Item: PublishedMessage{
+						Subject: msg.Subject()}}
+				return
+			}
+
+			pm := PublishedMessage{
+				Subject:            msg.Subject(),
+				Sequence:           meta.Sequence.Stream,
+				PublishedTimestamp: meta.Timestamp,
+				Headers:            msg.Headers(),
+				Data:               msg.Data()}
+
+			if pm.Sequence <= lastSequence {
+				log.Debug("not relaying message, already processed", "sequence", pm.Sequence, "lastSequence", lastSequence)
+				err = msg.Ack()
+				if err != nil {
+					log.Warn("failed to ack message", "err", err)
+				}
+			}
+
+			select {
+			case <-ctx.Done():
+				return
+			case ch <- WithError[PublishedMessage]{Item: pm}:
+				// nop
+			}
+
+			lastSequence = pm.Sequence
+
+			err = msg.Ack()
+			if err != nil {
+				log.Warn("failed to ack message", "err", err)
+				// TODO: Consider failure modes. Does failed ack imply redeliver?
+			}
+		}
+	}()
+
+	return ch, nil
+}
+
+func logWithConsumerConfig(log *slog.Logger, cfg jetstream.OrderedConsumerConfig) *slog.Logger {
+	l2 := log.With("deliverPolicy", cfg.DeliverPolicy, "filter", cfg.FilterSubjects)
+	switch cfg.DeliverPolicy {
+	case jetstream.DeliverByStartSequencePolicy:
+		l2 = l2.With("optStartSeq", cfg.OptStartSeq)
+	case jetstream.DeliverByStartTimePolicy:
+		l2 = l2.With("optStartTime", cfg.OptStartTime)
+	}
+	return l2
 }

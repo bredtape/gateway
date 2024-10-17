@@ -40,7 +40,7 @@ func (c HTTPExchangeConfig) Validate() error {
 // and acts as a client to the specified HTTP endpoint
 // HTTP headers must have:
 // * content-type: application/protobuf
-// * grpc-message-type: com.github.bredtape.gateway.nats_transfer.v1.MessageExchange
+// * grpc-message-type: com.github.bredtape.gateway.nats_sync.v1.MessageExchange
 type HTTPExchange struct {
 }
 
