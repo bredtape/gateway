@@ -30,10 +30,10 @@ const (
 // nats sync service, to initiate sync of a stream from one deployment to another.
 // To bootstrap the NatsSyncService itself, all deployments must have the
 // StartSync requests published to their designated nats stream for this service
-// (which matches either the source or target deployment)
+// (which matches either the source or sink deployment)
 type NatsSyncServiceClient interface {
 	// Start sync'ing a stream from one deployment to another.
-	// Only one sync operation can be active pr combination of source_deployment, source_stream_name and target_deployment
+	// Only one sync operation can be active pr combination of source_deployment, source_stream_name and sink_deployment
 	// You cannot change the parameters of the sync operation,  but must send a StopSync,
 	// then a new StartSync
 	StartSync(ctx context.Context, in *StartSyncRequest, opts ...grpc.CallOption) (*StartSyncResponse, error)
@@ -76,10 +76,10 @@ func (c *natsSyncServiceClient) StopSync(ctx context.Context, in *StopSyncReques
 // nats sync service, to initiate sync of a stream from one deployment to another.
 // To bootstrap the NatsSyncService itself, all deployments must have the
 // StartSync requests published to their designated nats stream for this service
-// (which matches either the source or target deployment)
+// (which matches either the source or sink deployment)
 type NatsSyncServiceServer interface {
 	// Start sync'ing a stream from one deployment to another.
-	// Only one sync operation can be active pr combination of source_deployment, source_stream_name and target_deployment
+	// Only one sync operation can be active pr combination of source_deployment, source_stream_name and sink_deployment
 	// You cannot change the parameters of the sync operation,  but must send a StopSync,
 	// then a new StartSync
 	StartSync(context.Context, *StartSyncRequest) (*StartSyncResponse, error)

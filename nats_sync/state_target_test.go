@@ -12,12 +12,11 @@ import (
 )
 
 // test state for where messages are incoming to use
-func TestStateTargetBasic(t *testing.T) {
+func TestStateSinkBasic(t *testing.T) {
 	Convey("init state", t, func() {
-		source := gateway.Deployment("xx")
-		target := gateway.Deployment("yy")
-		s, err := newState(target, map[gateway.Deployment]CommunicationSettings{
-			source: testDefaultComm}, nil)
+		from := gateway.Deployment("xx")
+		to := gateway.Deployment("yy")
+		s, err := newState(to, from, testDefaultComm, nil)
 		So(err, ShouldBeNil)
 
 		msg1 := &v1.Msg{
@@ -31,61 +30,56 @@ func TestStateTargetBasic(t *testing.T) {
 			Sequence:         4,
 			PublishTimestamp: timestamppb.Now()}
 
-		Convey("register subscription, with this deployment as the target", func() {
+		Convey("register subscription, with this deployment as the sink", func() {
 			req := &v1.StartSyncRequest{
-				SourceDeployment: source.String(),
-				ReplyDeployment:  source.String(),
-				TargetDeployment: target.String(),
+				SourceDeployment: from.String(),
+				SinkDeployment:   to.String(),
 				SourceStreamName: "stream1",
-				TargetStreamName: "stream2",
+				SinkStreamName:   "stream2",
 				ConsumerConfig:   &v1.ConsumerConfig{DeliverPolicy: v1.DeliverPolicy_DELIVER_POLICY_ALL}}
-			err := s.RegisterSubscription(req)
+			err := s.RegisterStartSync(req)
 			So(err, ShouldBeNil)
 
 			Convey("should not have local subscription", func() {
-				key := SourceSubscriptionKey{
-					TargetDeployment: target,
-					SourceStreamName: "stream1"}
+				key := SourceSubscriptionKey{SourceStreamName: "stream1"}
 				_, exists := s.GetSourceLocalSubscriptions(key)
 				So(exists, ShouldBeFalse)
 			})
 
-			key := TargetSubscriptionKey{
-				SourceDeployment: source,
-				SourceStreamName: "stream1"}
+			key := SinkSubscriptionKey{SourceStreamName: "stream1"}
 
-			Convey("should have target subscription", func() {
-				So(s.targetSubscription, ShouldContainKey, key)
+			Convey("should have sink subscription", func() {
+				So(s.sinkSubscription, ShouldContainKey, key)
 			})
 
 			Convey("deliver first msg for stream1", func() {
 				msgs1 := &v1.Msgs{
 					SetId:            NewSetID().String(),
 					SourceDeployment: "xx",
-					TargetDeployment: "yy",
+					SinkDeployment:   "yy",
 					SourceStreamName: "stream1",
 					ConsumerConfig:   &v1.ConsumerConfig{DeliverPolicy: v1.DeliverPolicy_DELIVER_POLICY_ALL},
 					LastSequence:     0,
 					Messages:         []*v1.Msg{msg1}}
 
 				t0 := time.Now()
-				err := s.TargetDeliverFromRemote(t0, msgs1)
+				err := s.SinkDeliverFromRemote(t0, msgs1)
 				So(err, ShouldBeNil)
 
 				Convey("should have incoming", func() {
-					So(s.TargetIncoming[key], ShouldHaveLength, 1)
+					So(s.SinkIncoming[key], ShouldHaveLength, 1)
 				})
 
 				Convey("commit set ID", func() {
-					err := s.TargetCommit(msgs1)
+					err := s.SinkCommit(msgs1)
 					So(err, ShouldBeNil)
 
 					Convey("should not have incoming messages", func() {
-						So(s.TargetIncoming[key], ShouldBeEmpty)
+						So(s.SinkIncoming[key], ShouldBeEmpty)
 					})
 
 					Convey("create batch", func() {
-						b, err := s.CreateMessageBatch(time.Now(), source)
+						b, err := s.CreateMessageBatch(time.Now())
 						So(err, ShouldBeNil)
 						So(b, ShouldNotBeNil)
 
@@ -111,7 +105,7 @@ func TestStateTargetBasic(t *testing.T) {
 							So(report.IsEmpty(), ShouldBeTrue)
 
 							Convey("create another batch, should have nothing to send", func() {
-								b, err := s.CreateMessageBatch(time.Now(), source)
+								b, err := s.CreateMessageBatch(time.Now())
 								So(err, ShouldBeNil)
 								So(b, ShouldBeNil)
 							})
@@ -122,19 +116,19 @@ func TestStateTargetBasic(t *testing.T) {
 						msgs2 := &v1.Msgs{
 							SetId:            NewSetID().String(),
 							SourceDeployment: "xx",
-							TargetDeployment: "yy",
+							SinkDeployment:   "yy",
 							SourceStreamName: "stream1",
 							ConsumerConfig:   &v1.ConsumerConfig{DeliverPolicy: v1.DeliverPolicy_DELIVER_POLICY_ALL},
 							LastSequence:     2,
 							Messages:         []*v1.Msg{msg2}}
 
 						t1 := time.Now()
-						err := s.TargetDeliverFromRemote(t1, msgs2)
+						err := s.SinkDeliverFromRemote(t1, msgs2)
 						So(err, ShouldBeNil)
 
 						Convey("should have incoming", func() {
-							So(s.TargetIncoming[key], ShouldHaveLength, 1)
-							So(s.TargetIncoming[key][0].Messages, ShouldHaveLength, 1)
+							So(s.SinkIncoming[key], ShouldHaveLength, 1)
+							So(s.SinkIncoming[key][0].Messages, ShouldHaveLength, 1)
 						})
 					})
 
@@ -142,19 +136,19 @@ func TestStateTargetBasic(t *testing.T) {
 						msgs2 := &v1.Msgs{
 							SetId:            NewSetID().String(),
 							SourceDeployment: "xx",
-							TargetDeployment: "yy",
+							SinkDeployment:   "yy",
 							SourceStreamName: "stream1",
 							ConsumerConfig:   &v1.ConsumerConfig{DeliverPolicy: v1.DeliverPolicy_DELIVER_POLICY_ALL},
 							LastSequence:     2,
 							Messages:         nil}
 
 						t1 := time.Now()
-						err := s.TargetDeliverFromRemote(t1, msgs2)
+						err := s.SinkDeliverFromRemote(t1, msgs2)
 						So(err, ShouldBeNil)
 
 						Convey("should have incoming, but empty", func() {
-							So(s.TargetIncoming[key], ShouldHaveLength, 1)
-							So(s.TargetIncoming[key][0].Messages, ShouldBeEmpty)
+							So(s.SinkIncoming[key], ShouldHaveLength, 1)
+							So(s.SinkIncoming[key][0].Messages, ShouldBeEmpty)
 						})
 					})
 				})
@@ -163,18 +157,18 @@ func TestStateTargetBasic(t *testing.T) {
 					msgs2 := &v1.Msgs{
 						SetId:            NewSetID().String(),
 						SourceDeployment: "xx",
-						TargetDeployment: "yy",
+						SinkDeployment:   "yy",
 						SourceStreamName: "stream1",
 						ConsumerConfig:   &v1.ConsumerConfig{DeliverPolicy: v1.DeliverPolicy_DELIVER_POLICY_ALL},
 						LastSequence:     2,
 						Messages:         []*v1.Msg{msg2}}
 
 					t1 := time.Now()
-					err := s.TargetDeliverFromRemote(t1, msgs2)
+					err := s.SinkDeliverFromRemote(t1, msgs2)
 					So(err, ShouldBeNil)
 
 					Convey("commit set ID", func() {
-						err := s.TargetCommit(msgs2)
+						err := s.SinkCommit(msgs2)
 
 						Convey("should have ErrSourceSequenceBroken", func() {
 							So(err, ShouldNotBeNil)
@@ -187,12 +181,13 @@ func TestStateTargetBasic(t *testing.T) {
 	})
 }
 
-func TestStateTargetBackpressure(t *testing.T) {
+func TestStateSinkBackpressure(t *testing.T) {
+	from := gateway.Deployment("xx")
+	to := gateway.Deployment("yy")
+
 	Convey("init state", t, func() {
-		source := gateway.Deployment("xx")
-		target := gateway.Deployment("yy")
-		s, err := newState(target, map[gateway.Deployment]CommunicationSettings{
-			source: testDefaultComm}, nil)
+		// with 'to' as the sink
+		s, err := newState(to, from, testDefaultComm, nil)
 		So(err, ShouldBeNil)
 
 		maxPending := testDefaultComm.MaxPendingIncomingMessagesPrSubscription
@@ -200,20 +195,17 @@ func TestStateTargetBackpressure(t *testing.T) {
 			So(maxPending, ShouldEqual, 10)
 		})
 
-		Convey("register subscription, with this deployment as the target", func() {
+		Convey("register subscription, with this deployment as the sink", func() {
 			req := &v1.StartSyncRequest{
-				SourceDeployment: source.String(),
-				ReplyDeployment:  source.String(),
-				TargetDeployment: target.String(),
+				SourceDeployment: "xx",
+				SinkDeployment:   "yy",
 				SourceStreamName: "stream1",
-				TargetStreamName: "stream2",
+				SinkStreamName:   "stream2",
 				ConsumerConfig:   &v1.ConsumerConfig{DeliverPolicy: v1.DeliverPolicy_DELIVER_POLICY_ALL}}
-			err := s.RegisterSubscription(req)
+			err := s.RegisterStartSync(req)
 			So(err, ShouldBeNil)
 
-			key := TargetSubscriptionKey{
-				SourceDeployment: source,
-				SourceStreamName: "stream1"}
+			key := SinkSubscriptionKey{SourceStreamName: "stream1"}
 
 			Convey("deliver 10 msg", func() {
 				xs := make([]*v1.Msg, 0)
@@ -228,26 +220,26 @@ func TestStateTargetBackpressure(t *testing.T) {
 				msgs1 := &v1.Msgs{
 					SetId:            NewSetID().String(),
 					SourceDeployment: "xx",
-					TargetDeployment: "yy",
+					SinkDeployment:   "yy",
 					SourceStreamName: "stream1",
 					ConsumerConfig:   &v1.ConsumerConfig{DeliverPolicy: v1.DeliverPolicy_DELIVER_POLICY_ALL},
 					LastSequence:     0,
 					Messages:         xs}
 
 				t0 := time.Now()
-				err := s.TargetDeliverFromRemote(t0, msgs1)
+				err := s.SinkDeliverFromRemote(t0, msgs1)
 				So(err, ShouldBeNil)
 
 				Convey("should have 1 incoming Msgs", func() {
-					So(s.TargetIncoming[key], ShouldHaveLength, 1)
+					So(s.SinkIncoming[key], ShouldHaveLength, 1)
 				})
 
 				Convey("commit set ID", func() {
-					err := s.TargetCommit(msgs1)
+					err := s.SinkCommit(msgs1)
 					So(err, ShouldBeNil)
 
 					Convey("should not have incoming messages", func() {
-						So(s.TargetIncoming[key], ShouldBeEmpty)
+						So(s.SinkIncoming[key], ShouldBeEmpty)
 					})
 				})
 
@@ -255,7 +247,7 @@ func TestStateTargetBackpressure(t *testing.T) {
 					msgs2 := &v1.Msgs{
 						SetId:            NewSetID().String(),
 						SourceDeployment: "xx",
-						TargetDeployment: "yy",
+						SinkDeployment:   "yy",
 						SourceStreamName: "stream1",
 						ConsumerConfig:   &v1.ConsumerConfig{DeliverPolicy: v1.DeliverPolicy_DELIVER_POLICY_ALL},
 						LastSequence:     10,
@@ -266,14 +258,14 @@ func TestStateTargetBackpressure(t *testing.T) {
 							PublishTimestamp: timestamppb.Now()}}}
 
 					t1 := time.Now()
-					err := s.TargetDeliverFromRemote(t1, msgs2)
+					err := s.SinkDeliverFromRemote(t1, msgs2)
 					Convey("should have ErrBackoff", func() {
 						So(err, ShouldNotBeNil)
 						So(errors.Is(err, ErrBackoff), ShouldBeTrue)
 					})
 
 					Convey("should still have 1 incoming Msgs", func() {
-						So(s.TargetIncoming[key], ShouldHaveLength, 1)
+						So(s.SinkIncoming[key], ShouldHaveLength, 1)
 					})
 				})
 			})
@@ -281,30 +273,26 @@ func TestStateTargetBackpressure(t *testing.T) {
 	})
 }
 
-func TestStateTargetNak(t *testing.T) {
+func TestStateSinkNak(t *testing.T) {
 	now := time.Now()
 
 	Convey("init state", t, func() {
-		source := gateway.Deployment("xx")
-		target := gateway.Deployment("yy")
-		s, err := newState(target, map[gateway.Deployment]CommunicationSettings{
-			source: testDefaultComm}, nil)
+		from := gateway.Deployment("xx")
+		to := gateway.Deployment("yy")
+		s, err := newState(to, from, testDefaultComm, nil)
 		So(err, ShouldBeNil)
 
-		Convey("register subscription, with this deployment as the target", func() {
+		Convey("register subscription, with this deployment as the sink", func() {
 			req := &v1.StartSyncRequest{
-				SourceDeployment: source.String(),
-				ReplyDeployment:  source.String(),
-				TargetDeployment: target.String(),
+				SourceDeployment: from.String(),
+				SinkDeployment:   to.String(),
 				SourceStreamName: "stream1",
-				TargetStreamName: "stream2",
+				SinkStreamName:   "stream2",
 				ConsumerConfig:   &v1.ConsumerConfig{DeliverPolicy: v1.DeliverPolicy_DELIVER_POLICY_ALL}}
-			err := s.RegisterSubscription(req)
+			err := s.RegisterStartSync(req)
 			So(err, ShouldBeNil)
 
-			key := TargetSubscriptionKey{
-				SourceDeployment: source,
-				SourceStreamName: "stream1"}
+			key := SinkSubscriptionKey{SourceStreamName: "stream1"}
 
 			Convey("deliver a msg with last sequence>0", func() {
 
@@ -317,32 +305,32 @@ func TestStateTargetNak(t *testing.T) {
 				msgs1 := &v1.Msgs{
 					SetId:            NewSetID().String(),
 					SourceDeployment: "xx",
-					TargetDeployment: "yy",
+					SinkDeployment:   "yy",
 					SourceStreamName: "stream1",
 					ConsumerConfig:   &v1.ConsumerConfig{DeliverPolicy: v1.DeliverPolicy_DELIVER_POLICY_ALL},
 					LastSequence:     30,
 					Messages:         []*v1.Msg{msg}}
 
 				t0 := time.Now()
-				err := s.TargetDeliverFromRemote(t0, msgs1)
+				err := s.SinkDeliverFromRemote(t0, msgs1)
 				So(err, ShouldBeNil)
 
 				Convey("should have 1 incoming Msgs", func() {
-					So(s.TargetIncoming[key], ShouldHaveLength, 1)
+					So(s.SinkIncoming[key], ShouldHaveLength, 1)
 				})
 
 				Convey("reject set ID", func() {
-					err := s.TargetCommitReject(msgs1, 0)
+					err := s.SinkCommitReject(msgs1, 0)
 					So(err, ShouldBeNil)
 
 					Convey("should not have incoming messages", func() {
-						So(s.TargetIncoming[key], ShouldBeEmpty)
+						So(s.SinkIncoming[key], ShouldBeEmpty)
 					})
 
 					Convey("should have 1 pending ack", func() {
-						So(s.PendingStats(now, source), ShouldResemble, []int{0, 1})
+						So(s.PendingStats(now), ShouldResemble, []int{0, 1})
 
-						b1, err := s.CreateMessageBatch(time.Now(), source)
+						b1, err := s.CreateMessageBatch(time.Now())
 						So(err, ShouldBeNil)
 						nak := b1.Acknowledges[0]
 

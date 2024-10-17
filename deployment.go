@@ -1,6 +1,6 @@
 package gateway
 
-// deployment name. Allowed characters: [a-z0-9]
+// deployment name. Allowed regex: [a-z][a-z0-9]*
 type Deployment string
 
 func (d Deployment) String() string {

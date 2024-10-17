@@ -10,10 +10,10 @@ option go_package = "github.com/bredtape/gateway/nats_sync/v1";
 // nats sync service, to initiate sync of a stream from one deployment to another.
 // To bootstrap the NatsSyncService itself, all deployments must have the
 // StartSync requests published to their designated nats stream for this service
-// (which matches either the source or target deployment)
+// (which matches either the source or sink deployment)
 service NatsSyncService {
   // Start sync'ing a stream from one deployment to another.
-  // Only one sync operation can be active pr combination of source_deployment, source_stream_name and target_deployment
+  // Only one sync operation can be active pr combination of source_deployment, source_stream_name and sink_deployment
   // You cannot change the parameters of the sync operation,  but must send a StopSync,
   // then a new StartSync
   rpc StartSync(StartSyncRequest) returns (StartSyncResponse);
@@ -26,95 +26,83 @@ message StartSyncRequest {
   // the deployment to sync from
   string source_deployment = 1;
 
-  // the deployment to send the reply back to
-  string reply_deployment = 2;
-
-  // the target deployment, where the messages are to be published.
-  string target_deployment = 3;
+  // the sink deployment, where the messages are to be published.
+  string sink_deployment = 2;
 
   // source stream name
-  string source_stream_name = 4;
+  string source_stream_name = 3;
 
-  // target stream name
+  // sink stream name
   // subject hierachy must match the source stream
-  string target_stream_name = 5;
+  string sink_stream_name = 4;
 
   // subscription filters used at the source for this stream
-  repeated string filter_subjects = 6;
+  repeated string filter_subjects = 5;
 
-  ConsumerConfig consumer_config = 7;
+  ConsumerConfig consumer_config = 6;
 }
 
 message StartSyncResponse {
   // the deployment to sync from
   string source_deployment = 1;
 
-  // the deployment to send the reply back to
-  string reply_deployment = 2;
-
   // the deployment the messages are to be published
-  string target_deployment = 3;
+  string sink_deployment = 2;
 
   // source stream name
-  string source_stream_name = 4;
+  string source_stream_name = 3;
 
-  // target stream name
+  // sink stream name
   // subject hierachy must match the source stream
-  string target_stream_name = 5;
+  string sink_stream_name = 4;
 
   // subscription filters used at the source for this stream
-  repeated string filter_subjects = 6;
+  repeated string filter_subjects = 5;
 
-  ConsumerConfig consumer_config = 7;
+  ConsumerConfig consumer_config = 6;
 }
 
 message StopSyncRequest {
   // the deployment to unsubscribe from
   string source_deployment = 1;
 
-  // the deployment to send the reply back to
-  string reply_deployment = 2;
-
   // the deployment the messages are to be published
-  string target_deployment = 3;
+  string sink_deployment = 2;
 
   // source stream name
-  string source_stream_name = 4;
+  string source_stream_name = 3;
 
-  // target stream name
+  // sink stream name
   // subject hierachy must match the source stream
-  string target_stream_name = 5;
+  string sink_stream_name = 4;
 
   // subscription filters used at the source for this stream
-  repeated string filter_subjects = 6;
+  repeated string filter_subjects = 5;
 }
 
 message StopSyncResponse {
   // the deployment where sync was requested from
   string source_deployment = 1;
 
-  // the deployment to send the reply back to
-  string reply_deployment = 2;
-
   // the deployment where sync was requested to
-  string target_deployment = 3;
+  string sink_deployment = 2;
 
   // source stream name
-  string source_stream_name = 4;
+  string source_stream_name = 3;
 
-  // target stream name
+  // sink stream name
   // subject hierachy must match the source stream
-  string target_stream_name = 5;
+  string sink_stream_name = 4;
 
   // set of filters used at the source for this stream
-  repeated string filter_subjects = 6;
+  repeated string filter_subjects = 5;
 
 }
 
 // ConsumerConfig defines the configuration for message consumption
 message ConsumerConfig {
   // DeliverPolicy determines how messages are delivered from the source deployment.
-  // It's used on initial subscription and when gaps are detected between source and target.
+  // It's used on initial subscription and when gaps are detected between source and sink.
   DeliverPolicy deliver_policy = 1;
 
   // OptStartSeq specifies the starting sequence number when deliver_policy is DELIVER_POLICY_BY_START_SEQUENCE.
@@ -177,8 +165,8 @@ message Msgs {
   // source deployment
   string source_deployment = 2;
 
-  // target deployment
-  string target_deployment = 3;
+  // sink deployment
+  string sink_deployment = 3;
 
   // source stream name
   string source_stream_name = 4;
@@ -218,7 +206,7 @@ message Acknowledge {
   // reason, should be specified when NAK
   // possible scenarios: message loss/corrupted, message missing (gap,
   // have received newer but is missing some), rejected (because subscription is
-  // not active at the target deployment, or a conflicting subscription is active)
+  // not active at the sink deployment, or a conflicting subscription is active)
   string reason = 6;
 }
 

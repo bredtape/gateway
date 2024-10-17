@@ -19,7 +19,7 @@ func init() {
 
 var (
 	ErrNoSubscription = errors.New("no subscription")
-	// slow consumer error, when the target has too many messages queued
+	// slow consumer error, when the sink has too many messages queued
 	ErrSlowConsumer         = errors.New("slow consumer")
 	ErrSourceSequenceBroken = errors.New("source sequence broken. Subscription must be restarted")
 	ErrBackoff              = errors.New("cannot accept new messages, pending messages must be dispatched first")
@@ -28,18 +28,18 @@ var (
 
 /* TODO:
 guarantee that messages are delivered in order
-[x] at target, send nak if Msgs is rejected (because it is out of sequence with target)
+[x] at sink, send nak if Msgs is rejected (because it is out of sequence with sink)
 [x] at source, handle nak by restarting subscription
 [x] at source, do not restart subscription again if a nak is received and ack is pending for a Msgs which
 	  contains the requested sequence range.
-[-] at target, do not accept batches with overlapping sequences (because it is impossible to keep 'Count')
+[-] at sink, do not accept batches with overlapping sequences (because it is impossible to keep 'Count')
 [-] at source, do not accept ack of batches with overlapping sequences (because it is impossible to keep 'Count')
 [x] initial source window start sequence (which could be persisted to improve startup)
 
 backpressure:
 [x] at source, do not accept new messages if there are too many pending messages (MaxPendingAcksPrSubscription)
 [x] at source, accept a partial batch of messages if limit has not been reached, and then apply backpressure
-[x] at target, do not accept incoming messages if there are too many pending messages (MaxPendingIncomingMessagesPrSubscription)
+[x] at sink, do not accept incoming messages if there are too many pending messages (MaxPendingIncomingMessagesPrSubscription)
 
 ack timeout:
 [x] at source, if ack is not received within AckTimeout, resend Msgs again (with the same SetID)
@@ -51,13 +51,13 @@ heartbeat:
 		* no messages have been resent
 		* no pending acks
 		* but some messages must have been sent before (to initialize the window)
-[x] at target, accept empty Msgs and send Acknowledge
+[x] at sink, accept empty Msgs and send Acknowledge
 
 max size:
 [x] at source, do not send batches that exceed MaxAccumulatedPayloadSizeBytes
 
 flush:
-[ ] at source, with pending messages/acks pr target, indicate the earliest time messages/acks should be sent to the target
+[ ] at source, with pending messages/acks pr sink, indicate the earliest time messages/acks should be sent to the sink
 
 short circuit:
 [ ] at source, if no acknowledgements are received for all streams per deployment, stop resending messages,
@@ -66,23 +66,26 @@ short circuit:
 fault scenarios:
 [?] at source, subscription is continuously restarted, all pendings acks are deleted and a new batch is sent
 	  again and again. Can this happen? How to detect?
-[?] source have subscription registered, but not target. Target keep replying with NAK, source keeps
+[?] source have subscription registered, but not sink. Sink keep replying with NAK, source keeps
     restarting. Instrument with metrics and define alert to detect this scenario.
 
 */
 
 // to manage internal state of sync.
 type state struct {
-	deployment gateway.Deployment
-	cs         map[gateway.Deployment]CommunicationSettings
+	from gateway.Deployment // self, the source or sink deployment
+	to   gateway.Deployment // other communicating part, the sink or source deployment
+
+	// communication settings for 'b' deployment
+	cs CommunicationSettings
 
 	// -- fields for source --
 	// outstanding acks
 	sourceAckWindows map[SourceSubscriptionKey]*SourcePendingWindow
 
-	// outgoing messages buffered per target deployment (not send yet)
+	// outgoing messages buffered per sink deployment (not send yet)
 	// Only present if there are messages to be sent for that subscription
-	sourceOutgoing map[gateway.Deployment]map[SourceSubscriptionKey][]*v1.Msg
+	sourceOutgoing map[SourceSubscriptionKey][]*v1.Msg
 
 	//InfoRequests map[string]StreamInfoRequest
 	//PubRequests  map[string]PublishRequest
@@ -90,33 +93,37 @@ type state struct {
 	// original source subscription, needed when subscription is restarted
 	sourceOriginalSubscription map[SourceSubscriptionKey]SourceSubscription
 
-	// -- fields for target --
+	// -- fields for sink --
 
-	targetCommit map[TargetSubscriptionKey]*TargetCommitWindow
+	sinkCommit map[SinkSubscriptionKey]*SinkCommitWindow
 
-	// target incoming per source deployment
-	// Ordered by sequence From. Do not modify, use TargetCommit/TargetCommitReject
-	TargetIncoming map[TargetSubscriptionKey][]*v1.Msgs
+	// sink incoming per source deployment
+	// Ordered by sequence From. Do not modify, use SinkCommit/SinkCommitReject
+	SinkIncoming map[SinkSubscriptionKey][]*v1.Msgs
 
-	// target subscription
-	targetSubscription map[TargetSubscriptionKey]TargetSubscription
+	// sink subscription
+	sinkSubscription map[SinkSubscriptionKey]SinkSubscription
 }
 
-// new state for deployment, settings and initial source sequences
-// The deployment may be a source and/or target for streams
+// new state for deployment 'from' communicating with 'to', where 'from' sources messages to sink 'to',
+// and 'to' sources messages to sink 'from'.
 // The initialSourceSequences is optional and specify the last sequence number acknowledged for each source stream
-func newState(d gateway.Deployment, cs map[gateway.Deployment]CommunicationSettings,
+func newState(from, to gateway.Deployment, cs CommunicationSettings,
 	initialSourceSequences map[SourceSubscriptionKey]uint64) (*state, error) {
+	if from == to {
+		return nil, errors.New("from and to must be different")
+	}
 	s := &state{
-		deployment: d,
-		cs:         cs,
-		// subscription at either source or target
+		from: from,
+		to:   to,
+		cs:   cs,
+		// subscription at either source or sink
 		sourceOriginalSubscription: make(map[SourceSubscriptionKey]SourceSubscription),
 		sourceAckWindows:           make(map[SourceSubscriptionKey]*SourcePendingWindow),
-		sourceOutgoing:             make(map[gateway.Deployment]map[SourceSubscriptionKey][]*v1.Msg),
-		targetCommit:               make(map[TargetSubscriptionKey]*TargetCommitWindow),
-		TargetIncoming:             make(map[TargetSubscriptionKey][]*v1.Msgs),
-		targetSubscription:         make(map[TargetSubscriptionKey]TargetSubscription)}
+		sourceOutgoing:             make(map[SourceSubscriptionKey][]*v1.Msg),
+		sinkCommit:                 make(map[SinkSubscriptionKey]*SinkCommitWindow),
+		SinkIncoming:               make(map[SinkSubscriptionKey][]*v1.Msgs),
+		sinkSubscription:           make(map[SinkSubscriptionKey]SinkSubscription)}
 
 	for sub, seq := range initialSourceSequences {
 		s.sourceAckWindows[sub] = &SourcePendingWindow{
@@ -126,20 +133,27 @@ func newState(d gateway.Deployment, cs map[gateway.Deployment]CommunicationSetti
 	return s, s.Validate()
 }
 
-// register subscription. If this deployment matches the source a LocalSubscriptions entry
-// will be present. If this deployment matches the target, messages are expected
-// to arrive and will then be published to the (local) target stream.
-func (s *state) RegisterSubscription(req *v1.StartSyncRequest) error {
-	if req.GetSourceDeployment() == req.GetTargetDeployment() {
-		return errors.New("source and target deployment must be different")
+func (s *state) HasSubscriptions() bool {
+	return len(s.sourceOriginalSubscription) > 0 || len(s.sinkSubscription) > 0
+}
+
+// start sync. If this deployment matches the source a LocalSubscriptions entry
+// will be present. If this deployment matches the sink, messages are expected
+// to arrive and will then be published to the (local) sink stream.
+func (s *state) RegisterStartSync(req *v1.StartSyncRequest) error {
+	from := gateway.Deployment(req.GetSourceDeployment())
+	to := gateway.Deployment(req.GetSinkDeployment())
+
+	if err := s.requestMatch(from, to); err != nil {
+		return err
 	}
 
-	isSource := req.GetSourceDeployment() == s.deployment.String()
-	isTarget := req.GetTargetDeployment() == s.deployment.String()
+	isSource := from == s.from
+	isSink := to == s.from
 
 	if isSource {
 		sub := toSourceSubscription(
-			gateway.Deployment(req.GetTargetDeployment()),
+			to,
 			req.GetSourceStreamName(),
 			req.GetConsumerConfig(), req.GetFilterSubjects())
 
@@ -160,87 +174,73 @@ func (s *state) RegisterSubscription(req *v1.StartSyncRequest) error {
 		return nil
 	}
 
-	if isTarget {
-		key := TargetSubscriptionKey{
-			SourceDeployment: gateway.Deployment(req.GetSourceDeployment()),
-			SourceStreamName: req.GetSourceStreamName()}
-		if _, exists := s.targetSubscription[key]; exists {
+	if isSink {
+		key := SinkSubscriptionKey{SourceStreamName: req.GetSourceStreamName()}
+		if _, exists := s.sinkSubscription[key]; exists {
 			return errors.New("subscription already exists")
 		}
 
-		sub := TargetSubscription{
-			TargetSubscriptionKey: key,
-			TargetDeployment:      gateway.Deployment(req.GetTargetDeployment()),
-			DeliverPolicy:         ToDeliverPolicy(req.GetConsumerConfig().GetDeliverPolicy()),
-			OptStartSeq:           req.GetConsumerConfig().GetOptStartSeq(),
-			FilterSubjects:        req.GetFilterSubjects()}
+		sub := SinkSubscription{
+			SinkSubscriptionKey: key,
+			SinkDeployment:      to,
+			DeliverPolicy:       ToDeliverPolicy(req.GetConsumerConfig().GetDeliverPolicy()),
+			OptStartSeq:         req.GetConsumerConfig().GetOptStartSeq(),
+			FilterSubjects:      req.GetFilterSubjects()}
 		if sub.DeliverPolicy == jetstream.DeliverByStartTimePolicy {
 			sub.OptStartTime = req.GetConsumerConfig().GetOptStartTime().AsTime()
 		}
 
-		s.targetSubscription[key] = sub
+		s.sinkSubscription[key] = sub
 		return nil
 	}
 
-	return errors.New("neither source nor target")
+	return errors.New("neither source nor sink")
 }
 
-func (s *state) UnregisterSubscription(req *v1.StopSyncRequest) error {
-	if req.GetSourceDeployment() == req.GetTargetDeployment() {
-		return errors.New("source and target deployment must be different")
+// stop sync
+func (s *state) RegisterStopSync(req *v1.StopSyncRequest) error {
+	source := gateway.Deployment(req.GetSourceDeployment())
+	sink := gateway.Deployment(req.GetSinkDeployment())
+
+	if err := s.requestMatch(source, sink); err != nil {
+		return err
 	}
 
-	isSource := req.GetSourceDeployment() == s.deployment.String()
-	isTarget := req.GetTargetDeployment() == s.deployment.String()
+	isSource := source == s.from
+	isSink := sink == s.from
 
 	if isSource {
-		key := SourceSubscriptionKey{
-			TargetDeployment: gateway.Deployment(req.GetTargetDeployment()),
-			SourceStreamName: req.GetSourceStreamName()}
-
+		key := SourceSubscriptionKey{SourceStreamName: req.GetSourceStreamName()}
 		delete(s.sourceOriginalSubscription, key)
 		delete(s.sourceAckWindows, key)
-		delete(s.sourceOutgoing[key.TargetDeployment], key)
-		if len(s.sourceOutgoing[key.TargetDeployment]) == 0 {
-			delete(s.sourceOutgoing, key.TargetDeployment)
-		}
+		delete(s.sourceOutgoing, key)
 		return nil
 	}
 
-	if isTarget {
-		key := TargetSubscriptionKey{
-			SourceDeployment: gateway.Deployment(req.GetSourceDeployment()),
-			SourceStreamName: req.GetSourceStreamName()}
-
-		delete(s.targetSubscription, key)
-		delete(s.targetCommit, key)
-		delete(s.TargetIncoming, key)
-
+	if isSink {
+		key := SinkSubscriptionKey{SourceStreamName: req.GetSourceStreamName()}
+		delete(s.sinkSubscription, key)
+		delete(s.sinkCommit, key)
+		delete(s.SinkIncoming, key)
 		return nil
 	}
 
-	return errors.New("neither source nor target")
+	return errors.New("neither source nor sink")
 }
 
 // create batch of messages and acks queued for 'to' deployment. Returns nil if no messages are queued
 // This will not delete the messages from the outgoing queue (you must call MarkDispatched)
-// You should call MarkDispatched after sending the batch to the target deployment.
+// You should call MarkDispatched after sending the batch to the sink deployment.
 // If you call CreateMessageBatch again before a succesful MarkDispatched, the same messages will be included (and more, if some messages have been delivered via SourceDeliverFromLocal)
-func (s *state) CreateMessageBatch(now time.Time, to gateway.Deployment) (*v1.MessageBatch, error) {
+func (s *state) CreateMessageBatch(now time.Time) (*v1.MessageBatch, error) {
 	m := &v1.MessageBatch{
-		ToDeployment:   to.String(),
-		FromDeployment: s.deployment.String(),
+		FromDeployment: s.from.String(),
+		ToDeployment:   s.to.String(),
 		SentTimestamp:  timestamppb.New(now.UTC())}
 
-	settings := s.cs[to]
-
-	remainingPayloadCapacity := settings.MaxAccumulatedPayloadSizeBytes
+	remainingPayloadCapacity := s.cs.MaxAccumulatedPayloadSizeBytes
 	for key, w := range s.sourceAckWindows {
-		if key.TargetDeployment != to {
-			continue
-		}
-
-		ids := w.GetRetransmit(now, settings.AckTimeoutPrSubscription, settings.AckRetryPrSubscription)
+		ids := w.GetRetransmit(now, s.cs.AckTimeoutPrSubscription, s.cs.AckRetryPrSubscription)
 		xs := s.repackMessages(key, ids)
 
 		// add messages to batch. We can't breakup a set of messages, so we must include all messages
@@ -252,7 +252,7 @@ func (s *state) CreateMessageBatch(now time.Time, to gateway.Deployment) (*v1.Me
 			}
 		}
 
-		if !w.ShouldSentHeartbeat(now, settings.HeartbeatIntervalPrSubscription) {
+		if !w.ShouldSentHeartbeat(now, s.cs.HeartbeatIntervalPrSubscription) {
 			continue
 		}
 
@@ -263,14 +263,14 @@ func (s *state) CreateMessageBatch(now time.Time, to gateway.Deployment) (*v1.Me
 
 		m.ListOfMessages = append(m.ListOfMessages, &v1.Msgs{
 			SetId:            NewSetID().String(),
-			SourceDeployment: s.deployment.String(),
-			TargetDeployment: to.String(),
+			SourceDeployment: s.from.String(),
+			SinkDeployment:   s.to.String(),
 			SourceStreamName: key.SourceStreamName,
 			LastSequence:     w.Extrema.To,
 			ConsumerConfig:   fromSourceSubscription(sub)})
 	}
 
-	for key := range s.sourceOutgoing[to] {
+	for key := range s.sourceOutgoing {
 		xs := s.packMessages(remainingPayloadCapacity, key)
 		for _, x := range xs {
 			m.ListOfMessages = append(m.ListOfMessages, x)
@@ -281,7 +281,7 @@ func (s *state) CreateMessageBatch(now time.Time, to gateway.Deployment) (*v1.Me
 		}
 	}
 
-	for _, w := range s.targetCommit {
+	for _, w := range s.sinkCommit {
 		for _, ack := range w.PendingAcks {
 			m.Acknowledges = append(m.Acknowledges, ack)
 		}
@@ -293,28 +293,23 @@ func (s *state) CreateMessageBatch(now time.Time, to gateway.Deployment) (*v1.Me
 	return m, nil
 }
 
-// pending stats for target deployment evaluated at 'now'
+// pending stats for 'to' deployment evaluated at 'now'
 // returns [number of messages (including re-transmit), number of pending acks]
-func (s *state) PendingStats(now time.Time, to gateway.Deployment) []int {
+func (s *state) PendingStats(now time.Time) []int {
 	var nm, na int
 
-	for key := range s.sourceOutgoing[to] {
-		nm += len(s.sourceOutgoing[to][key])
+	for key := range s.sourceOutgoing {
+		nm += len(s.sourceOutgoing[key])
 	}
 
-	for _, w := range s.targetCommit {
+	for _, w := range s.sinkCommit {
 		na += len(w.PendingAcks)
 	}
 
-	for key, w := range s.sourceAckWindows {
-		if key.TargetDeployment != to {
-			continue
-		}
+	for _, w := range s.sourceAckWindows {
+		nm += len(w.GetRetransmit(now, s.cs.AckTimeoutPrSubscription, s.cs.AckRetryPrSubscription))
 
-		settings := s.cs[key.TargetDeployment]
-		nm += len(w.GetRetransmit(now, settings.AckTimeoutPrSubscription, settings.AckRetryPrSubscription))
-
-		if w.ShouldSentHeartbeat(now, settings.HeartbeatIntervalPrSubscription) {
+		if w.ShouldSentHeartbeat(now, s.cs.HeartbeatIntervalPrSubscription) {
 			nm++
 		}
 	}
@@ -324,14 +319,14 @@ func (s *state) PendingStats(now time.Time, to gateway.Deployment) []int {
 
 type DispatchReport struct {
 	MessagesErrors map[SourceSubscriptionKey]error
-	AcksErrors     map[TargetSubscriptionKey]error
+	AcksErrors     map[SinkSubscriptionKey]error
 }
 
 func (r DispatchReport) IsEmpty() bool {
 	return len(r.MessagesErrors) == 0 && len(r.AcksErrors) == 0
 }
 
-// mark batch as dispatched to target deployment.
+// mark batch as dispatched to sink deployment.
 // A (partial) error may be returned per Subscription, meaning messages for other
 // subscription may have succeeded.
 func (s *state) MarkDispatched(b *v1.MessageBatch) DispatchReport {
@@ -339,14 +334,10 @@ func (s *state) MarkDispatched(b *v1.MessageBatch) DispatchReport {
 		return DispatchReport{}
 	}
 
-	d := gateway.Deployment(b.GetToDeployment())
-
 	// messages
 	msgsErrs := make(map[SourceSubscriptionKey]error)
 	for _, msgs := range b.ListOfMessages {
-		key := SourceSubscriptionKey{
-			TargetDeployment: d,
-			SourceStreamName: msgs.GetSourceStreamName()}
+		key := SourceSubscriptionKey{SourceStreamName: msgs.GetSourceStreamName()}
 
 		if _, exists := s.sourceAckWindows[key]; !exists {
 			s.sourceAckWindows[key] = &SourcePendingWindow{}
@@ -371,25 +362,23 @@ func (s *state) MarkDispatched(b *v1.MessageBatch) DispatchReport {
 		}
 
 		// only remove messages included in the batch
-		xs := s.sourceOutgoing[d][key]
+		xs := s.sourceOutgoing[key]
 		idx, found := findSequenceIndex(xs, ack.SequenceRange.To)
 		if found && (idx+1) < len(xs) {
-			s.sourceOutgoing[d][key] = xs[idx+1:]
+			s.sourceOutgoing[key] = xs[idx+1:]
 		} else {
-			s.sourceOutgoing[d][key] = nil
+			s.sourceOutgoing[key] = nil
 		}
 	}
 
 	// acknowledges
-	ackErrs := make(map[TargetSubscriptionKey]error)
+	ackErrs := make(map[SinkSubscriptionKey]error)
 	for _, ack := range b.Acknowledges {
-		key := TargetSubscriptionKey{
-			SourceDeployment: gateway.Deployment(b.GetToDeployment()),
-			SourceStreamName: ack.GetSourceStreamName()}
+		key := SinkSubscriptionKey{SourceStreamName: ack.GetSourceStreamName()}
 
-		w, exists := s.targetCommit[key]
+		w, exists := s.sinkCommit[key]
 		if !exists {
-			ackErrs[key] = fmt.Errorf("no target commits with key %s, have %v", key, s.targetCommit)
+			ackErrs[key] = fmt.Errorf("no sink commits with key %s, have %v", key, s.sinkCommit)
 			continue
 		}
 
@@ -421,9 +410,9 @@ type StreamInfoResponse struct {
 // message that should be published to local nats stream
 type PublishRequest struct {
 	SourceStreamName string
-	TargetStreamName string
+	SinkStreamName   string
 
-	// sequence of the last message published to the target stream. 0 if no messages have been published
+	// sequence of the last message published to the sink stream. 0 if no messages have been published
 	// Used for optimistic concurrency check
 	LastSequence uint64
 
@@ -487,13 +476,11 @@ func cmpMsgSequence(a, b *v1.Msg) int {
 }
 
 type SourceSubscriptionKey struct {
-	TargetDeployment gateway.Deployment
 	SourceStreamName string
 }
 
 func GetSubscriptionKey(b *v1.Msgs) SourceSubscriptionKey {
 	return SourceSubscriptionKey{
-		TargetDeployment: gateway.Deployment(b.GetTargetDeployment()),
 		SourceStreamName: b.GetSourceStreamName()}
 }
 
@@ -509,19 +496,10 @@ func (id SetID) String() string {
 }
 
 func (s *state) Validate() error {
-	if _, exists := s.cs[s.deployment]; exists {
-		return errors.New("must only have communication settings for targets, not self")
+	if ve := s.cs.Validate(); ve != nil {
+		return errors.Wrap(ve, "invalid communication settings")
 	}
 
-	if len(s.cs) == 0 {
-		return errors.New("communication settings empty")
-	}
-
-	for d, cs := range s.cs {
-		if ve := cs.Validate(); ve != nil {
-			return errors.Wrapf(ve, "invalid communication settings for deployment %s", d)
-		}
-	}
 	return nil
 }
 
@@ -531,4 +509,17 @@ func getPayloadSize(m *v1.Msgs) int {
 		size += len(x.Data)
 	}
 	return size
+}
+
+func (s *state) requestMatch(source, sink gateway.Deployment) error {
+	if source == sink {
+		return errors.New("source and sink deployment must be different")
+	}
+	if source != s.from && source != s.to {
+		return errors.New("source not matching this state")
+	}
+	if sink != s.from && sink != s.to {
+		return errors.New("sink not matching this state")
+	}
+	return nil
 }

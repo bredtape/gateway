@@ -77,7 +77,7 @@ func TestNatsSyncLowLevelSync(t *testing.T) {
 		MaxPendingAcksPrSubscription:    5}
 
 	// deployment A
-	var syncA *NatsSync
+	var clientA *NatsSyncClient
 	{
 		js := getJSConnA()
 		ex, err := NewFileExchange(fecA)
@@ -89,11 +89,11 @@ func TestNatsSyncLowLevelSync(t *testing.T) {
 			SyncStream:            generateRandomString() + "subscription",
 			CommunicationSettings: map[gateway.Deployment]CommunicationSettings{db: cs},
 			Exchanges:             map[gateway.Deployment]Exchange{db: ex}}
-		sync, err := StartNatsSync(ctx, js, config)
+		err = StartNatsSync(ctx, js, config)
 		assert.NoError(t, err)
-		syncA = sync
 
-		s, err := sync.CreateSyncStream(ctx)
+		clientA = NewSyncClient(config.SyncStream, js)
+		s, err := clientA.CreateSyncStream(ctx)
 		assert.NoError(t, err)
 
 		info, err := s.Info(ctx)
@@ -102,7 +102,7 @@ func TestNatsSyncLowLevelSync(t *testing.T) {
 	}
 
 	// deployment B
-	var syncB *NatsSync
+	var clientB *NatsSyncClient
 	{
 		js := getJSConnB()
 		fecB := fecA
@@ -116,11 +116,11 @@ func TestNatsSyncLowLevelSync(t *testing.T) {
 			SyncStream:            generateRandomString() + "subscription",
 			CommunicationSettings: map[gateway.Deployment]CommunicationSettings{da: cs},
 			Exchanges:             map[gateway.Deployment]Exchange{da: ex}}
-		sync, err := StartNatsSync(ctx, js, config)
+		err = StartNatsSync(ctx, js, config)
 		assert.NoError(t, err)
-		syncB = sync
 
-		s, err := sync.CreateSyncStream(ctx)
+		clientB = NewSyncClient(config.SyncStream, js)
+		s, err := clientB.CreateSyncStream(ctx)
 		assert.NoError(t, err, "failed to create subscription stream on B")
 
 		info, err := s.Info(ctx)
@@ -130,11 +130,11 @@ func TestNatsSyncLowLevelSync(t *testing.T) {
 
 	// publish subscription directly to each nats-servers, to enable sync of the subscription stream itself
 	{
-		ack, err := syncA.PublishBootstrapSync(ctx, da, db)
+		ack, err := clientA.PublishBootstrapSync(ctx, da, db)
 		assert.NoError(t, err)
 		t.Logf("publish bootstrap at A, ack %+v", ack)
 
-		ack, err = syncB.PublishBootstrapSync(ctx, da, db)
+		ack, err = clientB.PublishBootstrapSync(ctx, da, db)
 		assert.NoError(t, err)
 		t.Logf("publish bootstrap at B, ack %+v", ack)
 	}
@@ -142,7 +142,7 @@ func TestNatsSyncLowLevelSync(t *testing.T) {
 	// create "app" stream on A, which are to be synced to B
 	appStreamA := generateRandomString() + "_app"
 	{
-		jsA, err := syncA.js.Connect(ctx)
+		jsA, err := clientA.js.Connect(ctx)
 		assert.NoError(t, err)
 
 		_, err = jsA.CreateStream(ctx, jetstream.StreamConfig{
@@ -156,7 +156,7 @@ func TestNatsSyncLowLevelSync(t *testing.T) {
 	// create "app" stream on B, which are to be synced from A
 	appStreamB := generateRandomString() + "_app"
 	{
-		jsB, err := syncB.js.Connect(ctx)
+		jsB, err := clientB.js.Connect(ctx)
 		assert.NoError(t, err)
 
 		_, err = jsB.CreateStream(ctx, jetstream.StreamConfig{
@@ -171,13 +171,13 @@ func TestNatsSyncLowLevelSync(t *testing.T) {
 	{
 		sub := &v1.StartSyncRequest{
 			SourceDeployment: da.String(),
-			TargetDeployment: db.String(),
+			SinkDeployment:   db.String(),
 			SourceStreamName: appStreamA,
-			TargetStreamName: appStreamB}
-		_, err := syncA.publishStartSyncRequest(ctx, sub)
+			SinkStreamName:   appStreamB}
+		_, err := clientA.publishStartSyncRequest(ctx, sub)
 		assert.NoError(t, err)
 
-		_, err = syncB.publishStartSyncRequest(ctx, sub)
+		_, err = clientB.publishStartSyncRequest(ctx, sub)
 		assert.NoError(t, err)
 		t.Logf("requested sync of app stream from A to B")
 	}
@@ -185,14 +185,14 @@ func TestNatsSyncLowLevelSync(t *testing.T) {
 	// publish messages to the "app" stream on A. Use http GetRequest (to have a defined proto message, but different)
 	{
 		req := &rh.GetRequest{Url: "http://something.com"}
-		ack, err := syncA.js.PublishProto(ctx, appStreamA+".something", nil, req, jetstream.WithExpectStream(appStreamA))
+		ack, err := clientA.js.PublishProto(ctx, appStreamA+".something", nil, req, jetstream.WithExpectStream(appStreamA))
 		assert.NoError(t, err)
 		t.Logf("published http request to %s at A", ack.Stream)
 	}
 
 	// wait for messages to be synced to B
 	{
-		js, err := syncB.js.Connect(ctx)
+		js, err := clientB.js.Connect(ctx)
 		assert.NoError(t, err)
 
 		// deliver all

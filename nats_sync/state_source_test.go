@@ -25,10 +25,9 @@ var (
 
 func TestStateSourceBasic(t *testing.T) {
 	Convey("init state", t, func() {
-		source := gateway.Deployment("xx")
-		target := gateway.Deployment("yy")
-		s, err := newState(source, map[gateway.Deployment]CommunicationSettings{
-			target: testDefaultComm}, nil)
+		from := gateway.Deployment("xx")
+		to := gateway.Deployment("yy")
+		s, err := newState(from, to, testDefaultComm, nil)
 		So(err, ShouldBeNil)
 
 		msg1 := &v1.Msg{
@@ -44,19 +43,16 @@ func TestStateSourceBasic(t *testing.T) {
 
 		Convey("register subscription, with this deployment as the source", func() {
 			req := &v1.StartSyncRequest{
-				SourceDeployment: source.String(),
-				ReplyDeployment:  source.String(),
-				TargetDeployment: target.String(),
+				SourceDeployment: from.String(),
+				SinkDeployment:   to.String(),
 				SourceStreamName: "stream1",
-				TargetStreamName: "stream2",
+				SinkStreamName:   "stream2",
 				ConsumerConfig: &v1.ConsumerConfig{
 					DeliverPolicy: v1.DeliverPolicy_DELIVER_POLICY_ALL}}
-			err := s.RegisterSubscription(req)
+			err := s.RegisterStartSync(req)
 			So(err, ShouldBeNil)
 
-			key := SourceSubscriptionKey{
-				TargetDeployment: target,
-				SourceStreamName: "stream1"}
+			key := SourceSubscriptionKey{SourceStreamName: "stream1"}
 
 			Convey("should have source-subscription to deliver all", func() {
 				sub, exists := s.GetSourceLocalSubscriptions(key)
@@ -78,7 +74,7 @@ func TestStateSourceBasic(t *testing.T) {
 
 				Convey("create batch", func() {
 					t0 := time.Now()
-					batch1, err := s.CreateMessageBatch(t0, target)
+					batch1, err := s.CreateMessageBatch(t0)
 					So(err, ShouldBeNil)
 
 					Convey("should have outgoing messages for stream1", func() {
@@ -89,7 +85,7 @@ func TestStateSourceBasic(t *testing.T) {
 							So(ms.SourceStreamName, ShouldEqual, "stream1")
 						})
 						Convey("with target deployment", func() {
-							So(ms.TargetDeployment, ShouldEqual, "yy")
+							So(ms.SinkDeployment, ShouldEqual, "yy")
 						})
 						Convey("with consumer config, deliver all", func() {
 							So(ms.ConsumerConfig.DeliverPolicy, ShouldEqual, v1.DeliverPolicy_DELIVER_POLICY_ALL)
@@ -102,7 +98,7 @@ func TestStateSourceBasic(t *testing.T) {
 						So(report.IsEmpty(), ShouldBeTrue)
 
 						Convey("create another batch", func() {
-							batch2, errs := s.CreateMessageBatch(t1, target)
+							batch2, errs := s.CreateMessageBatch(t1)
 							So(errs, ShouldBeNil)
 
 							Convey("should be empty", func() {
@@ -117,7 +113,7 @@ func TestStateSourceBasic(t *testing.T) {
 								SequenceFrom:     0,
 								SequenceTo:       2}
 
-							err := s.SourceHandleTargetAck(t1, t1, target, ack1)
+							err := s.SourceHandleSinkAck(t1, t1, to, ack1)
 							So(err, ShouldBeNil)
 
 							Convey("should have updated Subscriptions, to be deliver from sequence 2", func() {
@@ -133,7 +129,7 @@ func TestStateSourceBasic(t *testing.T) {
 								So(count, ShouldEqual, 1)
 
 								Convey("create batch2", func() {
-									batch2, errs := s.CreateMessageBatch(t1, target)
+									batch2, errs := s.CreateMessageBatch(t1)
 									So(errs, ShouldBeNil)
 									So(batch2, ShouldNotBeNil)
 
@@ -153,7 +149,7 @@ func TestStateSourceBasic(t *testing.T) {
 								SequenceFrom:     0,
 								SequenceTo:       2}
 
-							err := s.SourceHandleTargetAck(t1, t1, target, ack2)
+							err := s.SourceHandleSinkAck(t1, t1, to, ack2)
 							So(err, ShouldBeNil)
 
 							Convey("should not have updated Subscriptions", func() {
@@ -170,7 +166,7 @@ func TestStateSourceBasic(t *testing.T) {
 							So(count, ShouldEqual, 1)
 
 							t2 := time.Now()
-							batch2, errs := s.CreateMessageBatch(t2, target)
+							batch2, errs := s.CreateMessageBatch(t2)
 							So(errs, ShouldBeNil)
 							So(batch2, ShouldNotBeNil)
 
@@ -185,7 +181,7 @@ func TestStateSourceBasic(t *testing.T) {
 										SequenceFrom:     0,
 										SequenceTo:       2}
 
-									err := s.SourceHandleTargetAck(t1, t1, target, ack1)
+									err := s.SourceHandleSinkAck(t1, t1, to, ack1)
 									So(err, ShouldBeNil)
 
 									Convey("should have updated Subscriptions, to be deliver from sequence 4", func() {
@@ -202,7 +198,7 @@ func TestStateSourceBasic(t *testing.T) {
 											SequenceFrom:     2,
 											SequenceTo:       4}
 
-										err := s.SourceHandleTargetAck(t1, t1, target, ack2)
+										err := s.SourceHandleSinkAck(t1, t1, to, ack2)
 										So(err, ShouldBeNil)
 									})
 								})
@@ -214,7 +210,7 @@ func TestStateSourceBasic(t *testing.T) {
 										SequenceFrom:     2,
 										SequenceTo:       4}
 
-									err := s.SourceHandleTargetAck(t1, t1, target, ack2)
+									err := s.SourceHandleSinkAck(t1, t1, to, ack2)
 									So(err, ShouldBeNil)
 
 									Convey("should have _not_ have updated Subscriptions", func() {
@@ -237,11 +233,11 @@ func TestStateSourceBackpressure(t *testing.T) {
 	now := time.Now()
 
 	Convey("init state", t, func() {
-		source := gateway.Deployment("xx")
-		target := gateway.Deployment("yy")
+		from := gateway.Deployment("xx")
+		to := gateway.Deployment("yy")
 
 		maxPending := testDefaultComm.MaxPendingAcksPrSubscription
-		s, err := newState(source, map[gateway.Deployment]CommunicationSettings{target: testDefaultComm}, nil)
+		s, err := newState(from, to, testDefaultComm, nil)
 		So(err, ShouldBeNil)
 
 		Convey("assumed max pending is 10", func() {
@@ -250,18 +246,15 @@ func TestStateSourceBackpressure(t *testing.T) {
 
 		Convey("register subscription, with this deployment as the source", func() {
 			req := &v1.StartSyncRequest{
-				SourceDeployment: source.String(),
-				ReplyDeployment:  source.String(),
-				TargetDeployment: target.String(),
+				SourceDeployment: from.String(),
+				SinkDeployment:   to.String(),
 				SourceStreamName: "stream1",
-				TargetStreamName: "stream2",
+				SinkStreamName:   "stream2",
 				ConsumerConfig:   &v1.ConsumerConfig{DeliverPolicy: v1.DeliverPolicy_DELIVER_POLICY_ALL}}
-			err := s.RegisterSubscription(req)
+			err := s.RegisterStartSync(req)
 			So(err, ShouldBeNil)
 
-			key := SourceSubscriptionKey{
-				TargetDeployment: target,
-				SourceStreamName: "stream1"}
+			key := SourceSubscriptionKey{SourceStreamName: "stream1"}
 
 			Convey("deliver 10 messages for stream1", func() {
 				msgs := make([]*v1.Msg, 0)
@@ -279,7 +272,7 @@ func TestStateSourceBackpressure(t *testing.T) {
 				So(count, ShouldEqual, 10)
 
 				Convey("should have 10 outgoing messages", func() {
-					So(s.PendingStats(now, target), ShouldResemble, []int{maxPending, 0})
+					So(s.PendingStats(now), ShouldResemble, []int{maxPending, 0})
 				})
 
 				Convey("deliver 1 more message for stream1", func() {
@@ -297,7 +290,7 @@ func TestStateSourceBackpressure(t *testing.T) {
 						So(count, ShouldEqual, 0)
 					})
 					Convey("should still have 10 outgoing messages", func() {
-						So(s.PendingStats(now, target), ShouldResemble, []int{maxPending, 0})
+						So(s.PendingStats(now), ShouldResemble, []int{maxPending, 0})
 					})
 				})
 
@@ -308,19 +301,19 @@ func TestStateSourceBackpressure(t *testing.T) {
 					So(count, ShouldEqual, 1)
 
 					Convey("should have 1 outgoing messages", func() {
-						So(s.PendingStats(now, target), ShouldResemble, []int{1, 0})
+						So(s.PendingStats(now), ShouldResemble, []int{1, 0})
 					})
 				})
 
 				Convey("create batch and dispatch", func() {
-					b, err := s.CreateMessageBatch(time.Now(), target)
+					b, err := s.CreateMessageBatch(time.Now())
 					So(err, ShouldBeNil)
 
 					report := s.MarkDispatched(b)
 					So(report.IsEmpty(), ShouldBeTrue)
 
 					Convey("should have 0 outgoing messages", func() {
-						So(s.PendingStats(now, target), ShouldResemble, []int{0, 0})
+						So(s.PendingStats(now), ShouldResemble, []int{0, 0})
 					})
 
 					Convey("deliver 1 more message for stream1", func() {
@@ -357,7 +350,7 @@ func TestStateSourceBackpressure(t *testing.T) {
 				So(count, ShouldEqual, 8)
 
 				Convey("should have 8 outgoing messages", func() {
-					So(s.PendingStats(now, target), ShouldResemble, []int{8, 0})
+					So(s.PendingStats(now), ShouldResemble, []int{8, 0})
 				})
 
 				Convey("deliver 4 messages", func() {
@@ -380,7 +373,7 @@ func TestStateSourceBackpressure(t *testing.T) {
 						So(count, ShouldEqual, 2)
 					})
 					Convey("should have 10 outgoing messages", func() {
-						So(s.PendingStats(now, target), ShouldResemble, []int{maxPending, 0})
+						So(s.PendingStats(now), ShouldResemble, []int{maxPending, 0})
 					})
 				})
 			})
@@ -390,27 +383,24 @@ func TestStateSourceBackpressure(t *testing.T) {
 
 func TestStateSourceNAK(t *testing.T) {
 	Convey("init state", t, func() {
-		source := gateway.Deployment("xx")
-		target := gateway.Deployment("yy")
+		from := gateway.Deployment("xx")
+		to := gateway.Deployment("yy")
 
-		s, err := newState(source, map[gateway.Deployment]CommunicationSettings{target: testDefaultComm}, nil)
+		s, err := newState(from, to, testDefaultComm, nil)
 		So(err, ShouldBeNil)
 
 		Convey("register subscription, with this deployment as the source", func() {
 			req := &v1.StartSyncRequest{
-				SourceDeployment: source.String(),
-				ReplyDeployment:  source.String(),
-				TargetDeployment: target.String(),
+				SourceDeployment: from.String(),
+				SinkDeployment:   to.String(),
 				SourceStreamName: "stream1",
-				TargetStreamName: "stream2",
+				SinkStreamName:   "stream2",
 				ConsumerConfig: &v1.ConsumerConfig{
 					DeliverPolicy: v1.DeliverPolicy_DELIVER_POLICY_ALL}}
-			err := s.RegisterSubscription(req)
+			err := s.RegisterStartSync(req)
 			So(err, ShouldBeNil)
 
-			key := SourceSubscriptionKey{
-				TargetDeployment: target,
-				SourceStreamName: "stream1"}
+			key := SourceSubscriptionKey{SourceStreamName: "stream1"}
 
 			Convey("deliver messages for stream1, starting from 0", func() {
 				msgs := []*v1.Msg{{
@@ -423,7 +413,7 @@ func TestStateSourceNAK(t *testing.T) {
 				So(err, ShouldBeNil)
 
 				Convey("create batch and send", func() {
-					b, err := s.CreateMessageBatch(time.Now(), target)
+					b, err := s.CreateMessageBatch(time.Now())
 					So(err, ShouldBeNil)
 
 					report := s.MarkDispatched(b)
@@ -438,7 +428,7 @@ func TestStateSourceNAK(t *testing.T) {
 							SequenceFrom:     0,
 							SequenceTo:       0}
 
-						err := s.SourceHandleTargetAck(time.Now(), time.Now(), target, nak)
+						err := s.SourceHandleSinkAck(time.Now(), time.Now(), to, nak)
 						So(err, ShouldBeNil)
 
 						Convey("should have updated Subscriptions, to be deliver from sequence 0", func() {
@@ -457,7 +447,7 @@ func TestStateSourceNAK(t *testing.T) {
 							SequenceFrom:     15,
 							SequenceTo:       0}
 
-						err := s.SourceHandleTargetAck(time.Now(), time.Now(), target, nak)
+						err := s.SourceHandleSinkAck(time.Now(), time.Now(), to, nak)
 						So(err, ShouldBeNil)
 
 						Convey("should have updated Subscriptions, to be deliver from sequence 15", func() {
@@ -478,7 +468,7 @@ func TestStateSourceNAK(t *testing.T) {
 							So(err, ShouldBeNil)
 
 							Convey("create batch and send", func() {
-								b2, err := s.CreateMessageBatch(time.Now(), target)
+								b2, err := s.CreateMessageBatch(time.Now())
 								So(err, ShouldBeNil)
 
 								report := s.MarkDispatched(b2)
@@ -492,7 +482,7 @@ func TestStateSourceNAK(t *testing.T) {
 										SequenceFrom:     15,
 										SequenceTo:       16}
 
-									err := s.SourceHandleTargetAck(time.Now(), time.Now(), target, ack)
+									err := s.SourceHandleSinkAck(time.Now(), time.Now(), to, ack)
 									So(err, ShouldBeNil)
 
 									Convey("should have updated Subscriptions, to be deliver from sequence 16", func() {
@@ -516,26 +506,21 @@ func TestStateSourceInit(t *testing.T) {
 	now := time.Now()
 
 	Convey("init state, starting seq 15", t, func() {
-		source := gateway.Deployment("xx")
-		target := gateway.Deployment("yy")
-		key := SourceSubscriptionKey{
-			TargetDeployment: target,
-			SourceStreamName: "stream1"}
-
-		s, err := newState(source, map[gateway.Deployment]CommunicationSettings{target: testDefaultComm},
-			map[SourceSubscriptionKey]uint64{key: 15})
+		from := gateway.Deployment("xx")
+		to := gateway.Deployment("yy")
+		key := SourceSubscriptionKey{SourceStreamName: "stream1"}
+		s, err := newState(from, to, testDefaultComm, map[SourceSubscriptionKey]uint64{key: 15})
 		So(err, ShouldBeNil)
 
 		Convey("register subscription, with this deployment as the source", func() {
 			req := &v1.StartSyncRequest{
-				SourceDeployment: source.String(),
-				ReplyDeployment:  source.String(),
-				TargetDeployment: target.String(),
+				SourceDeployment: from.String(),
+				SinkDeployment:   to.String(),
 				SourceStreamName: "stream1",
-				TargetStreamName: "stream2",
+				SinkStreamName:   "stream2",
 				ConsumerConfig: &v1.ConsumerConfig{
 					DeliverPolicy: v1.DeliverPolicy_DELIVER_POLICY_ALL}}
-			err := s.RegisterSubscription(req)
+			err := s.RegisterStartSync(req)
 			So(err, ShouldBeNil)
 
 			Convey("deliver messages for stream1, starting from 15", func() {
@@ -549,7 +534,7 @@ func TestStateSourceInit(t *testing.T) {
 				So(err, ShouldBeNil)
 
 				Convey("create batch and send", func() {
-					b1, err := s.CreateMessageBatch(time.Now(), target)
+					b1, err := s.CreateMessageBatch(time.Now())
 					So(err, ShouldBeNil)
 
 					report := s.MarkDispatched(b1)
@@ -564,7 +549,7 @@ func TestStateSourceInit(t *testing.T) {
 							SourceStreamName: "stream1",
 							SequenceFrom:     25}
 
-						err := s.SourceHandleTargetAck(time.Now(), time.Now(), target, nak)
+						err := s.SourceHandleSinkAck(time.Now(), time.Now(), to, nak)
 						So(err, ShouldBeNil)
 
 						Convey("should have updated Subscriptions, to be deliver from sequence 25", func() {
@@ -593,7 +578,7 @@ func TestStateSourceInit(t *testing.T) {
 								SequenceFrom:     25,
 								SequenceTo:       0}
 
-							err := s.SourceHandleTargetAck(time.Now(), time.Now(), target, nak)
+							err := s.SourceHandleSinkAck(time.Now(), time.Now(), to, nak)
 							So(err, ShouldBeNil)
 
 							Convey("deliver message from 25", func() {
@@ -609,7 +594,7 @@ func TestStateSourceInit(t *testing.T) {
 						})
 
 						Convey("create batch#2 and send", func() {
-							b2, err := s.CreateMessageBatch(time.Now(), target)
+							b2, err := s.CreateMessageBatch(time.Now())
 							So(err, ShouldBeNil)
 							setID2 := b2.ListOfMessages[0].SetId
 
@@ -624,7 +609,7 @@ func TestStateSourceInit(t *testing.T) {
 									SequenceFrom:     25,
 									SequenceTo:       0}
 
-								err := s.SourceHandleTargetAck(time.Now(), time.Now(), target, nak1)
+								err := s.SourceHandleSinkAck(time.Now(), time.Now(), to, nak1)
 								So(err, ShouldBeNil)
 
 								Convey("deliver message from 25", func() {
@@ -638,11 +623,11 @@ func TestStateSourceInit(t *testing.T) {
 									So(err, ShouldBeNil)
 
 									Convey("should have 1 message to send", func() {
-										So(s.PendingStats(now, target), ShouldResemble, []int{1, 0})
+										So(s.PendingStats(now), ShouldResemble, []int{1, 0})
 									})
 
 									Convey("create batch#3 and send", func() {
-										b3, err := s.CreateMessageBatch(time.Now(), target)
+										b3, err := s.CreateMessageBatch(time.Now())
 										So(err, ShouldBeNil)
 										report := s.MarkDispatched(b3)
 										So(report.IsEmpty(), ShouldBeTrue)
@@ -659,7 +644,7 @@ func TestStateSourceInit(t *testing.T) {
 												SequenceFrom:     25,
 												SequenceTo:       0}
 
-											err := s.SourceHandleTargetAck(time.Now(), time.Now(), target, nak2)
+											err := s.SourceHandleSinkAck(time.Now(), time.Now(), to, nak2)
 											So(err, ShouldBeNil)
 
 											Convey("should not reset subscription", func() {
@@ -680,7 +665,7 @@ func TestStateSourceInit(t *testing.T) {
 												So(err, ShouldBeNil)
 
 												Convey("should have 1 message to send", func() {
-													So(s.PendingStats(now, target), ShouldResemble, []int{1, 0})
+													So(s.PendingStats(now), ShouldResemble, []int{1, 0})
 												})
 											})
 										})
@@ -694,7 +679,7 @@ func TestStateSourceInit(t *testing.T) {
 											SequenceFrom:     25,
 											SequenceTo:       0}
 
-										err := s.SourceHandleTargetAck(time.Now(), time.Now(), target, nak2)
+										err := s.SourceHandleSinkAck(time.Now(), time.Now(), to, nak2)
 										So(err, ShouldBeNil)
 
 										Convey("should not reset subscription", func() {
@@ -705,7 +690,7 @@ func TestStateSourceInit(t *testing.T) {
 										})
 
 										Convey("should have 1 message to send", func() {
-											So(s.PendingStats(now, target), ShouldResemble, []int{1, 0})
+											So(s.PendingStats(now), ShouldResemble, []int{1, 0})
 										})
 									})
 								})
@@ -720,11 +705,11 @@ func TestStateSourceInit(t *testing.T) {
 
 func TestStateSourceAckTimeout(t *testing.T) {
 	Convey("init state", t, func() {
-		source := gateway.Deployment("xx")
-		target := gateway.Deployment("yy")
+		from := gateway.Deployment("xx")
+		to := gateway.Deployment("yy")
 
 		ackTimeout := testDefaultComm.AckTimeoutPrSubscription
-		s, err := newState(source, map[gateway.Deployment]CommunicationSettings{target: testDefaultComm}, nil)
+		s, err := newState(from, to, testDefaultComm, nil)
 		So(err, ShouldBeNil)
 
 		Convey("assumed ack timeout 1 second", func() {
@@ -733,18 +718,15 @@ func TestStateSourceAckTimeout(t *testing.T) {
 
 		Convey("register subscription, with this deployment as the source", func() {
 			req := &v1.StartSyncRequest{
-				SourceDeployment: source.String(),
-				ReplyDeployment:  source.String(),
-				TargetDeployment: target.String(),
+				SourceDeployment: from.String(),
+				SinkDeployment:   to.String(),
 				SourceStreamName: "stream1",
-				TargetStreamName: "stream2",
+				SinkStreamName:   "stream2",
 				ConsumerConfig:   &v1.ConsumerConfig{DeliverPolicy: v1.DeliverPolicy_DELIVER_POLICY_ALL}}
-			err := s.RegisterSubscription(req)
+			err := s.RegisterStartSync(req)
 			So(err, ShouldBeNil)
 
-			key := SourceSubscriptionKey{
-				TargetDeployment: target,
-				SourceStreamName: "stream1"}
+			key := SourceSubscriptionKey{SourceStreamName: "stream1"}
 
 			Convey("deliver message", func() {
 				msg1 := &v1.Msg{
@@ -757,7 +739,7 @@ func TestStateSourceAckTimeout(t *testing.T) {
 
 				Convey("create batch#1 and send", func() {
 					t0 := time.Now()
-					b1, err := s.CreateMessageBatch(t0, target)
+					b1, err := s.CreateMessageBatch(t0)
 					So(err, ShouldBeNil)
 
 					report := s.MarkDispatched(b1)
@@ -767,11 +749,11 @@ func TestStateSourceAckTimeout(t *testing.T) {
 						t1 := t0.Add(2 * time.Second)
 
 						Convey("should have 1 message to send", func() {
-							So(s.PendingStats(t1, key.TargetDeployment), ShouldResemble, []int{1, 0})
+							So(s.PendingStats(t1), ShouldResemble, []int{1, 0})
 						})
 
 						Convey("create batch#2", func() {
-							b2, err := s.CreateMessageBatch(t1, target)
+							b2, err := s.CreateMessageBatch(t1)
 							So(err, ShouldBeNil)
 
 							Convey("should have 1 Msgs to send", func() {
@@ -798,7 +780,7 @@ func TestStateSourceAckTimeout(t *testing.T) {
 									t2 := t1.Add(5 * time.Second)
 
 									Convey("should have 1 message to send", func() {
-										So(s.PendingStats(t2, key.TargetDeployment), ShouldResemble, []int{1, 0})
+										So(s.PendingStats(t2), ShouldResemble, []int{1, 0})
 									})
 								})
 
@@ -806,7 +788,7 @@ func TestStateSourceAckTimeout(t *testing.T) {
 									t2 := t1.Add(4 * time.Second)
 
 									Convey("should have NO message to send", func() {
-										So(s.PendingStats(t2, key.TargetDeployment), ShouldResemble, []int{0, 0})
+										So(s.PendingStats(t2), ShouldResemble, []int{0, 0})
 									})
 								})
 							})
@@ -817,11 +799,11 @@ func TestStateSourceAckTimeout(t *testing.T) {
 						t1 := t0.Add(1 * time.Second)
 
 						Convey("should have no messages to send", func() {
-							So(s.PendingStats(t1, key.TargetDeployment), ShouldResemble, []int{0, 0})
+							So(s.PendingStats(t1), ShouldResemble, []int{0, 0})
 						})
 
 						Convey("create batch#2", func() {
-							b2, err := s.CreateMessageBatch(t1, target)
+							b2, err := s.CreateMessageBatch(t1)
 							So(err, ShouldBeNil)
 
 							Convey("should have no Msgs to send", func() {
@@ -837,11 +819,11 @@ func TestStateSourceAckTimeout(t *testing.T) {
 
 func TestStateSourceHeartbeat(t *testing.T) {
 	Convey("init state", t, func() {
-		source := gateway.Deployment("xx")
-		target := gateway.Deployment("yy")
+		from := gateway.Deployment("xx")
+		to := gateway.Deployment("yy")
 
 		heartbeatInterval := testDefaultComm.HeartbeatIntervalPrSubscription
-		s, err := newState(source, map[gateway.Deployment]CommunicationSettings{target: testDefaultComm}, nil)
+		s, err := newState(from, to, testDefaultComm, nil)
 		So(err, ShouldBeNil)
 
 		Convey("assumed heartbeat interval of 1 min", func() {
@@ -850,18 +832,15 @@ func TestStateSourceHeartbeat(t *testing.T) {
 
 		Convey("register subscription, with this deployment as the source", func() {
 			req := &v1.StartSyncRequest{
-				SourceDeployment: source.String(),
-				ReplyDeployment:  source.String(),
-				TargetDeployment: target.String(),
+				SourceDeployment: from.String(),
+				SinkDeployment:   to.String(),
 				SourceStreamName: "stream1",
-				TargetStreamName: "stream2",
+				SinkStreamName:   "stream2",
 				ConsumerConfig:   &v1.ConsumerConfig{DeliverPolicy: v1.DeliverPolicy_DELIVER_POLICY_ALL}}
-			err := s.RegisterSubscription(req)
+			err := s.RegisterStartSync(req)
 			So(err, ShouldBeNil)
 
-			key := SourceSubscriptionKey{
-				TargetDeployment: target,
-				SourceStreamName: "stream1"}
+			key := SourceSubscriptionKey{SourceStreamName: "stream1"}
 
 			Convey("deliver message", func() {
 				msg1 := &v1.Msg{
@@ -874,13 +853,13 @@ func TestStateSourceHeartbeat(t *testing.T) {
 
 				Convey("create batch#1 and send", func() {
 					t1 := time.Now()
-					b1, err := s.CreateMessageBatch(t1, target)
+					b1, err := s.CreateMessageBatch(t1)
 					So(err, ShouldBeNil)
 
 					report := s.MarkDispatched(b1)
 					So(report.IsEmpty(), ShouldBeTrue)
 
-					So(s.sourceOutgoing[key.TargetDeployment][key], ShouldHaveLength, 0)
+					So(s.sourceOutgoing[key], ShouldHaveLength, 0)
 
 					Convey("receive ack for batch#1", func() {
 						ack1 := &v1.Acknowledge{
@@ -889,7 +868,7 @@ func TestStateSourceHeartbeat(t *testing.T) {
 							SequenceFrom:     0,
 							SequenceTo:       1}
 
-						err := s.SourceHandleTargetAck(t1, t1, target, ack1)
+						err := s.SourceHandleSinkAck(t1, t1, to, ack1)
 						So(err, ShouldBeNil)
 
 						Convey("no ack received within heartbeat interval (1 min), should send heartbeat after 1 min", func() {
@@ -909,11 +888,11 @@ func TestStateSourceHeartbeat(t *testing.T) {
 							})
 
 							Convey("should have 1 message to send", func() {
-								So(s.PendingStats(t2, key.TargetDeployment), ShouldResemble, []int{1, 0})
+								So(s.PendingStats(t2), ShouldResemble, []int{1, 0})
 							})
 
 							Convey("create batch#2", func() {
-								b2, err := s.CreateMessageBatch(t2, target)
+								b2, err := s.CreateMessageBatch(t2)
 								So(err, ShouldBeNil)
 
 								Convey("should have 1 Msgs to send", func() {
@@ -926,11 +905,11 @@ func TestStateSourceHeartbeat(t *testing.T) {
 							t2 := t1.Add(59 * time.Second)
 
 							Convey("should have no messages to send", func() {
-								So(s.PendingStats(t2, key.TargetDeployment), ShouldResemble, []int{0, 0})
+								So(s.PendingStats(t2), ShouldResemble, []int{0, 0})
 							})
 
 							Convey("create batch#2", func() {
-								b2, err := s.CreateMessageBatch(t2, target)
+								b2, err := s.CreateMessageBatch(t2)
 								So(err, ShouldBeNil)
 
 								Convey("should have 0 Msgs to send", func() {
@@ -944,10 +923,10 @@ func TestStateSourceHeartbeat(t *testing.T) {
 						t2 := t1.Add(1 * time.Minute)
 
 						Convey("should have retransmit (but not heartbeat) to send", func() {
-							So(s.PendingStats(t2, key.TargetDeployment), ShouldResemble, []int{1, 0})
+							So(s.PendingStats(t2), ShouldResemble, []int{1, 0})
 
 							Convey("create batch#2", func() {
-								b2, err := s.CreateMessageBatch(t2, target)
+								b2, err := s.CreateMessageBatch(t2)
 								So(err, ShouldBeNil)
 
 								Convey("should have 1 Msgs to send, matching retransmit", func() {
@@ -966,12 +945,11 @@ func TestStateSourceHeartbeat(t *testing.T) {
 
 func TestStateSourceMaxPayloadSize(t *testing.T) {
 	Convey("init state", t, func() {
-		source := gateway.Deployment("xx")
-		target := gateway.Deployment("yy")
+		from := gateway.Deployment("xx")
+		to := gateway.Deployment("yy")
 
 		maxSize := testDefaultComm.MaxAccumulatedPayloadSizeBytes
-		s, err := newState(source, map[gateway.Deployment]CommunicationSettings{
-			target: testDefaultComm}, nil)
+		s, err := newState(from, to, testDefaultComm, nil)
 		So(err, ShouldBeNil)
 
 		Convey("assumed max size is 1kB", func() {
@@ -980,19 +958,16 @@ func TestStateSourceMaxPayloadSize(t *testing.T) {
 
 		Convey("register subscription, with this deployment as the source", func() {
 			req := &v1.StartSyncRequest{
-				SourceDeployment: source.String(),
-				ReplyDeployment:  source.String(),
-				TargetDeployment: target.String(),
+				SourceDeployment: from.String(),
+				SinkDeployment:   to.String(),
 				SourceStreamName: "stream1",
-				TargetStreamName: "stream2",
+				SinkStreamName:   "stream2",
 				ConsumerConfig: &v1.ConsumerConfig{
 					DeliverPolicy: v1.DeliverPolicy_DELIVER_POLICY_ALL}}
-			err := s.RegisterSubscription(req)
+			err := s.RegisterStartSync(req)
 			So(err, ShouldBeNil)
 
-			key := SourceSubscriptionKey{
-				TargetDeployment: target,
-				SourceStreamName: "stream1"}
+			key := SourceSubscriptionKey{SourceStreamName: "stream1"}
 
 			Convey("deliver msg to local, smaller than max size", func() {
 				msg1 := &v1.Msg{
@@ -1004,7 +979,7 @@ func TestStateSourceMaxPayloadSize(t *testing.T) {
 				So(count, ShouldEqual, 1)
 
 				Convey("create batch, should have 1 message", func() {
-					b, err := s.CreateMessageBatch(time.Now(), target)
+					b, err := s.CreateMessageBatch(time.Now())
 					So(err, ShouldBeNil)
 					So(b.GetListOfMessages(), ShouldHaveLength, 1)
 					So(b.GetListOfMessages()[0].GetMessages(), ShouldHaveLength, 1)
@@ -1021,11 +996,11 @@ func TestStateSourceMaxPayloadSize(t *testing.T) {
 					So(count, ShouldEqual, 1)
 
 					Convey("should have 2 outgoing messages (in pending stats)", func() {
-						So(s.PendingStats(time.Now(), target), ShouldResemble, []int{2, 0})
+						So(s.PendingStats(time.Now()), ShouldResemble, []int{2, 0})
 					})
 
 					Convey("create batch, should only include 1 message, not the 2nd message", func() {
-						b, err := s.CreateMessageBatch(time.Now(), target)
+						b, err := s.CreateMessageBatch(time.Now())
 						So(err, ShouldBeNil)
 						So(b.GetListOfMessages(), ShouldHaveLength, 1)
 						So(b.GetListOfMessages()[0].GetMessages(), ShouldHaveLength, 1)
@@ -1035,7 +1010,7 @@ func TestStateSourceMaxPayloadSize(t *testing.T) {
 							So(report.IsEmpty(), ShouldBeTrue)
 
 							Convey("should have 1 outgoing messages", func() {
-								So(s.PendingStats(time.Now(), target), ShouldResemble, []int{1, 0})
+								So(s.PendingStats(time.Now()), ShouldResemble, []int{1, 0})
 							})
 						})
 					})

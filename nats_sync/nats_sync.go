@@ -30,19 +30,21 @@ var (
 )
 
 type NatsSyncConfig struct {
+	// 'this' deployment
 	Deployment gateway.Deployment
+
 	// Stream to persist start/stop sync requests.
 	// Should exist, and must be replicated (by other means) to all deployments participating in the sync.
 	// This implies that requests only can be accepted at the deployment that is the
 	// source of the stream.
-	// Assuming subjects: <target deployment>.<source_deployment>.<source stream name>
+	// Assuming subjects: <sink deployment>.<source_deployment>.<source stream name>
 	// Retention with MaxMsgsPerSubject can be used to limit the number of messages
 	SyncStream string
 
-	// communication settings pr deployment
+	// communication settings pr sink deployment
 	CommunicationSettings map[gateway.Deployment]CommunicationSettings
 
-	// exchanges for each deployment. Must match the deployments in CommunicationSettings
+	// exchanges for each sink deployment. Must match the deployments in CommunicationSettings
 	Exchanges map[gateway.Deployment]Exchange
 }
 
@@ -91,31 +93,40 @@ func (c NatsSyncConfig) Validate() error {
 	return nil
 }
 
-type NatsSync struct {
-	config NatsSyncConfig
-	js     *JSConn
-}
-
-func StartNatsSync(ctx context.Context, js *JSConn, config NatsSyncConfig) (*NatsSync, error) {
+func StartNatsSync(ctx context.Context, js *JSConn, config NatsSyncConfig) error {
 	if err := config.Validate(); err != nil {
-		return nil, errors.Wrap(err, "invalid config")
+		return errors.Wrap(err, "invalid config")
 	}
-	_, err := newState(config.Deployment, config.CommunicationSettings, nil)
-	if err != nil {
-		return nil, errors.Wrap(err, "failed to create state")
+
+	for d, cs := range config.CommunicationSettings {
+		ns := &natsSync{
+			from:       config.Deployment,
+			to:         d,
+			cs:         cs,
+			syncStream: config.SyncStream,
+			exchange:   config.Exchanges[d],
+			js:         js}
+		go ns.outerLoop(ctx)
 	}
-	ns := &NatsSync{
-		config: config,
-		js:     js}
-	go ns.outerLoop(ctx)
-	return ns, nil
+
+	return nil
 }
 
-func (ns *NatsSync) outerLoop(ctx context.Context) {
+// nats sync for from and to deployment (bidirectional)
+type natsSync struct {
+	from, to   gateway.Deployment
+	cs         CommunicationSettings
+	syncStream string
+	exchange   Exchange
+
+	js *JSConn
+}
+
+func (ns *natsSync) outerLoop(ctx context.Context) {
 	r := retry.Must(retry.NewExp(0.5, time.Second, 10*time.Second))
 
 	r.Try(ctx, func() error {
-		log := slog.With("deployment", ns.config.Deployment)
+		log := slog.With("from", ns.from, "to", ns.to)
 
 		ctxInner, cancel := context.WithCancel(ctx)
 		err := ns.loop(ctxInner, log)
@@ -127,158 +138,108 @@ func (ns *NatsSync) outerLoop(ctx context.Context) {
 	})
 }
 
-func (ns *NatsSync) loop(ctx context.Context, log *slog.Logger) error {
-	state, err := newState(ns.config.Deployment, ns.config.CommunicationSettings, nil)
+func (ns *natsSync) loop(ctx context.Context, log *slog.Logger) error {
+	state, err := newState(ns.from, ns.to, ns.cs, nil)
 	if err != nil {
 		return errors.Wrap(err, "failed to create state")
 	}
 
-	var existingSyncs []SyncRequests
-	ch, err := ns.SubscribeToSync(ctx)
+	syncRequestsCh, err := ns.SubscribeToSync(ctx)
 	if err != nil {
 		return errors.Wrap(err, "failed to subscribe to sync stream")
 	}
 
-	// wait for existing sync requests
-	for msg := range ch {
-		if msg.Error != nil {
-			continue
-		}
-
-		if msg.Item.ReachedHead {
-			break
-		}
-
-		existingSyncs = append(existingSyncs, msg.Item)
+	realIncomingCh, err := ns.exchange.StartReceiving(ctx)
+	if err != nil {
+		return errors.Wrap(err, "failed to start receiving for deployment")
 	}
 
-	if len(existingSyncs) == 0 {
-		log.Warn("no existing sync requests")
-		return errors.New("no existing sync requests")
-	}
-
-	var okCount int
-	for _, s := range existingSyncs {
-		if s.StartSyncRequest != nil {
-			req := s.StartSyncRequest
-			err := state.RegisterSubscription(req)
-			if err != nil {
-				log.Warn("failed to register subscription", "err", err,
-					"sourceStreamName", req.SourceStreamName,
-					"sourceDeployment", req.SourceDeployment,
-					"targetDeployment", req.TargetDeployment)
-			} else {
-				okCount++
-			}
-		} else if s.StopSyncRequest != nil {
-			req := s.StopSyncRequest
-			err := state.UnregisterSubscription(req)
-			if err != nil {
-				log.Warn("failed to unregister subscription", "err", err,
-					"sourceStreamName", req.SourceStreamName,
-					"sourceDeployment", req.SourceDeployment,
-					"targetDeployment", req.TargetDeployment)
-			}
-			// dont count stop as ok
-		}
-	}
-
-	// bail if some subscriptions failed to register or nothing was registered
-	if okCount == 0 {
-		return errors.New("failed to register any subscriptions (or nothing was registered)")
-	}
-
-	incoming := make(chan *v1.MessageBatch)
-
-	for d, e := range ns.config.Exchanges {
-		ch, err := e.StartReceiving(ctx)
-		if err != nil {
-			return errors.Wrapf(err, "failed to start receiving for deployment %s", d)
-		}
-
-		// forward incoming messages
-		go func() {
-			for msg := range ch {
-				incoming <- msg
-			}
-		}()
-	}
-
-	// manage nats source subscriptions
+	// incomingCh messages are initially ignored until existing sync requests have been processed
+	incomingCh := make(<-chan *v1.MessageBatch)
+	reachedSyncHead := false
 
 	for {
+		if reachedSyncHead {
+			if state.HasSubscriptions() {
+				incomingCh = realIncomingCh
+			} else {
+				log.Info("no subscriptions, waiting for sync requests")
+			}
+		}
+
 		select {
 		/*
 			   also handle:
 			   * changes to sync:
 				   Apply to state, cleanup subscriptions and timers. Or maybe, restart everything else?
 
-			   * flush timeout per target deployment:
-				  Could have a select-loop first which reads available messages (breaks when no messages available), then a select-loop which waits for the flush timeout. If no messages are available, but some buffered, send a flush message. Need to know when the first message per target deployment was received. Also, if SourceDeliverFromLocal produces a ErrBackoff, when should we retry? Probably need another retry setting for this.
+			   * flush timeout per sink deployment:
+				  Could have a select-loop first which reads available messages (breaks when no messages available), then a select-loop which waits for the flush timeout. If no messages are available, but some buffered, send a flush message. Need to know when the first message per sink deployment was received. Also, if SourceDeliverFromLocal produces a ErrBackoff, when should we retry? Probably need another retry setting for this.
 
-			   * heartbeat per target deployment:
-				  Could start a timer per target deployment with the configured interval, then when it expires, check whether there has been any activity since the last heartbeat. If so, readjust the timer to last activity + interval. If not, send a heartbeat message.
+			   * heartbeat per sink deployment:
+				  Could start a timer per sink deployment with the configured interval, then when it expires, check whether there has been any activity since the last heartbeat. If so, readjust the timer to last activity + interval. If not, send a heartbeat message.
 
 				 * incoming backpressure:
-				   If a state reports ErrBackoff for a target deployment, the message received must be queued, but
-					 future messages should not be received until the backoff is lifted. Would it be simpler to have a state instance per target deployment?
+				   If a state reports ErrBackoff for a sink deployment, the message received must be queued, but
+					 future messages should not be received until the backoff is lifted. Would it be simpler to have a state instance per sink deployment?
 
 		*/
 
 		case <-ctx.Done():
-		case msg, ok := <-incoming:
-			if ok {
+		case msg, ok := <-incomingCh:
+			if !ok {
 				return errors.New("incoming channel closed")
 			}
 
-			if msg.GetToDeployment() != ns.config.Deployment.String() {
-				log.Debug("skipping message not for this deployment", "msg", msg)
+			if msg.GetToDeployment() != ns.from.String() {
+				log.Warn("skipping message, not for this deployment", "msg", msg)
 				continue
 			}
 
 			err := ns.handleIncomingMessage(ctx, msg)
 			log.Error("failed to handle incoming message, ignoring", "err", err)
+
+		case msg, ok := <-syncRequestsCh:
+			if !ok {
+				return errors.New("sync channel closed")
+			}
+
+			if msg.Error != nil {
+				log.Warn("failed to receive sync request (ignoring)", "err", msg.Error)
+				continue
+			}
+
+			// enable incoming messages when all existing sync requests have been processed
+			if msg.Item.ReachedHead {
+				reachedSyncHead = true
+			}
+
+			if msg.Item.StartSyncRequest != nil {
+				err := state.RegisterStartSync(msg.Item.StartSyncRequest)
+				if err != nil {
+					log.Warn("failed to register start sync", "err", err,
+						"sourceStreamName", msg.Item.StartSyncRequest.SourceStreamName,
+						"sourceDeployment", msg.Item.StartSyncRequest.SourceDeployment,
+						"sinkDeployment", msg.Item.StartSyncRequest.SinkDeployment)
+				}
+			} else if msg.Item.StopSyncRequest != nil {
+				err := state.RegisterStopSync(msg.Item.StopSyncRequest)
+				if err != nil {
+					log.Warn("failed to register stop sync", "err", err,
+						"sourceStreamName", msg.Item.StopSyncRequest.SourceStreamName,
+						"sourceDeployment", msg.Item.StopSyncRequest.SourceDeployment,
+						"sinkDeployment", msg.Item.StopSyncRequest.SinkDeployment)
+				}
+			}
 		}
 	}
 }
 
-func (ns *NatsSync) handleIncomingMessage(ctx context.Context, msg *v1.MessageBatch) error {
-	log := slog.With("operation", "handleIncomingMessage", "deployment", ns.config.Deployment)
+func (ns *natsSync) handleIncomingMessage(ctx context.Context, msg *v1.MessageBatch) error {
+	log := slog.With("operation", "handleIncomingMessage", "from", ns.from, "to", ns.to)
 	log.Debug("received batch", "msg", msg)
 
 	return nil
-}
-
-// create nats stream for sync stream. Should only be used for testing
-func (ns *NatsSync) CreateSyncStream(ctx context.Context) (jetstream.Stream, error) {
-	c, err := ns.js.Connect(ctx)
-	if err != nil {
-		return nil, errors.Wrap(err, "failed to connect to nats")
-	}
-
-	return c.CreateStream(ctx, jetstream.StreamConfig{
-		Name:              ns.config.SyncStream,
-		Description:       "Stream for persisting Start/Stop sync requests. Must exist at all 'deployments' participating in the sync. Subjects: <target deployment>.<source_deployment>.<source stream name>",
-		Subjects:          []string{ns.config.SyncStream + ".*.*.*"},
-		Retention:         jetstream.LimitsPolicy,
-		MaxMsgsPerSubject: 5,
-		Discard:           jetstream.DiscardOld})
-}
-
-// publish Sync request for the sync itself from source to target deployment.
-// The same request must be published at both the source and target deployment.
-func (ns *NatsSync) PublishBootstrapSync(ctx context.Context, source, target gateway.Deployment) (*jetstream.PubAck, error) {
-	req := &v1.StartSyncRequest{
-		SourceDeployment: source.String(),
-		ReplyDeployment:  source.String(),
-		TargetDeployment: target.String(),
-		SourceStreamName: subscriptionStream, // use placeholder
-		TargetStreamName: subscriptionStream, // use placeholder
-		FilterSubjects:   nil,
-		ConsumerConfig: &v1.ConsumerConfig{
-			DeliverPolicy: v1.DeliverPolicy_DELIVER_POLICY_ALL}}
-
-	return ns.publishStartSyncRequest(ctx, req)
 }
 
 type WithError[T any] struct {
@@ -296,7 +257,7 @@ type SyncRequests struct {
 // subscribe to published sync requests.
 // Will block if nothing exists.
 // Will send an empty SyncRequests with ReachedHead=true when all existing requests have been sent.
-func (ns *NatsSync) SubscribeToSync(ctx context.Context) (chan WithError[SyncRequests], error) {
+func (ns *natsSync) SubscribeToSync(ctx context.Context) (chan WithError[SyncRequests], error) {
 	// determine head sequence
 	var headSequence uint64
 	{
@@ -307,7 +268,7 @@ func (ns *NatsSync) SubscribeToSync(ctx context.Context) (chan WithError[SyncReq
 		cfg := jetstream.OrderedConsumerConfig{
 			DeliverPolicy:  jetstream.DeliverLastPolicy,
 			FilterSubjects: ns.getSyncStreamFilterSubjects()}
-		ch, err := ns.js.SubscribeOrderered(subCtx, ns.config.SyncStream, cfg)
+		ch, err := ns.js.SubscribeOrderered(subCtx, ns.syncStream, cfg)
 		if err != nil {
 			return nil, errors.Wrap(err, "failed to subscribe to sync stream")
 		}
@@ -324,7 +285,7 @@ func (ns *NatsSync) SubscribeToSync(ctx context.Context) (chan WithError[SyncReq
 		DeliverPolicy:  jetstream.DeliverLastPerSubjectPolicy,
 		FilterSubjects: ns.getSyncStreamFilterSubjects()}
 
-	ch, err := ns.js.SubscribeOrderered(ctx, ns.config.SyncStream, cfg)
+	ch, err := ns.js.SubscribeOrderered(ctx, ns.syncStream, cfg)
 	if err != nil {
 		return nil, errors.Wrap(err, "failed to subscribe to sync stream")
 	}
@@ -399,20 +360,6 @@ func (ns *NatsSync) SubscribeToSync(ctx context.Context) (chan WithError[SyncReq
 	return resultCh, nil
 }
 
-func (ns *NatsSync) publishStartSyncRequest(ctx context.Context, req *v1.StartSyncRequest) (*jetstream.PubAck, error) {
-	subject := fmt.Sprintf("%s.%s.%s.%s", ns.config.SyncStream,
-		req.TargetDeployment, req.SourceDeployment, req.SourceStreamName)
-
-	return ns.js.PublishProto(ctx, subject, nil, req, jetstream.WithExpectStream(ns.config.SyncStream))
-}
-
-func (ns *NatsSync) publishStopSyncRequest(ctx context.Context, req *v1.StopSyncRequest) (*jetstream.PubAck, error) {
-	subject := fmt.Sprintf("%s.%s.%s.%s", ns.config.SyncStream,
-		req.TargetDeployment, req.SourceDeployment, req.SourceStreamName)
-
-	return ns.js.PublishProto(ctx, subject, nil, req, jetstream.WithExpectStream(ns.config.SyncStream))
-}
-
 // func (ns *NatsSync) SubscribeSyncRequests(ctx context.Context) ([]SyncRequests, error) {
 
 // 	var headSequence uint64
@@ -466,9 +413,9 @@ func (ns *NatsSync) publishStopSyncRequest(ctx context.Context, req *v1.StopSync
 // 	return result, nil
 // }
 
-func (ns *NatsSync) getSyncStreamFilterSubjects() []string {
+func (ns *natsSync) getSyncStreamFilterSubjects() []string {
 	return []string{
-		fmt.Sprintf("%s.%s.*.>", ns.config.SyncStream, ns.config.Deployment.String()), // target
-		fmt.Sprintf("%s.*.%s.>", ns.config.SyncStream, ns.config.Deployment.String()), // source
+		fmt.Sprintf("%s.%s.%s.>", ns.syncStream, ns.from.String(), ns.to.String()), // source
+		fmt.Sprintf("%s.%s.%s.>", ns.syncStream, ns.to.String(), ns.from.String()), // sink
 	}
 }

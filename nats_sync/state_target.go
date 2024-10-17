@@ -13,16 +13,16 @@ import (
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
-// target deliver messages from remote to internal buffer (in-memory), waiting to be committed
-func (s *state) TargetDeliverFromRemote(t time.Time, msgs *v1.Msgs) error {
-	sub := getTargetSubscription(msgs)
-	key := sub.TargetSubscriptionKey
+// sink deliver messages from remote to internal buffer (in-memory), waiting to be committed
+func (s *state) SinkDeliverFromRemote(t time.Time, msgs *v1.Msgs) error {
+	sub := getSinkSubscription(msgs)
+	key := sub.SinkSubscriptionKey
 
-	if sub.TargetDeployment != s.deployment {
-		return errors.New("target deployment does not match")
+	if sub.SinkDeployment != s.from {
+		return errors.Errorf("sink deployment does not match, expected %s, got %s", s.to, sub.SinkDeployment)
 	}
 
-	subRegistered, exists := s.targetSubscription[key]
+	subRegistered, exists := s.sinkSubscription[key]
 	if !exists {
 		return errors.Wrapf(ErrNoSubscription, "no subscription for key %v", key)
 	}
@@ -35,34 +35,33 @@ func (s *state) TargetDeliverFromRemote(t time.Time, msgs *v1.Msgs) error {
 		return errors.New("messages must be in order")
 	}
 
-	settings := s.cs[key.SourceDeployment]
 	c := len(msgs.GetMessages())
-	for _, m := range s.TargetIncoming[key] {
+	for _, m := range s.SinkIncoming[key] {
 		c += len(m.GetMessages())
 	}
 
-	if c > settings.MaxPendingIncomingMessagesPrSubscription {
-		return errors.Wrapf(ErrBackoff, "max pending incoming messages (%d) reached", settings.MaxPendingIncomingMessagesPrSubscription)
+	if c > s.cs.MaxPendingIncomingMessagesPrSubscription {
+		return errors.Wrapf(ErrBackoff, "max pending incoming messages (%d) reached", s.cs.MaxPendingIncomingMessagesPrSubscription)
 	}
 
 	// all checks passed, add to incoming
 	// (not checking that message sequence aligns here, since messages can be received out of order)
-	s.TargetIncoming[key] = append(s.TargetIncoming[key], msgs)
+	s.SinkIncoming[key] = append(s.SinkIncoming[key], msgs)
 
 	// order by last sequence
-	slices.SortFunc(s.TargetIncoming[key], cmpMsgsSequence)
+	slices.SortFunc(s.SinkIncoming[key], cmpMsgsSequence)
 
 	return nil
 }
 
-// commit set of incoming messages (which mean they have been persisted at the target).
+// commit set of incoming messages (which mean they have been persisted at the sink).
 // Incoming messages will not be deleted, if an error is returned
 // Messages but be persisted with source-sequence
-func (s *state) TargetCommit(msgs *v1.Msgs) error {
-	sub := getTargetSubscription(msgs)
-	key := sub.TargetSubscriptionKey
+func (s *state) SinkCommit(msgs *v1.Msgs) error {
+	sub := getSinkSubscription(msgs)
+	key := sub.SinkSubscriptionKey
 
-	for idx, pendingMsgs := range s.TargetIncoming[key] {
+	for idx, pendingMsgs := range s.SinkIncoming[key] {
 		if pendingMsgs.GetSetId() != msgs.GetSetId() {
 			continue
 		}
@@ -84,13 +83,13 @@ func (s *state) TargetCommit(msgs *v1.Msgs) error {
 			SequenceFrom:     seq.From,
 			SequenceTo:       seq.To}
 
-		if w, exists := s.targetCommit[key]; !exists {
+		if w, exists := s.sinkCommit[key]; !exists {
 			// sequence must start from 0
 			if seq.From != 0 {
 				return errors.Wrapf(ErrSourceSequenceBroken, "nothing committed yet, sequence must start from 0, but was %s", seq)
 			}
 
-			s.targetCommit[key] = &TargetCommitWindow{CommittedExtrema: seq}
+			s.sinkCommit[key] = &SinkCommitWindow{CommittedExtrema: seq}
 
 		} else {
 			// sequence must continue from last committed
@@ -99,10 +98,10 @@ func (s *state) TargetCommit(msgs *v1.Msgs) error {
 			}
 		}
 
-		s.targetCommit[key].Commit(ack)
-		s.TargetIncoming[key] = slices.Delete(s.TargetIncoming[key], idx, idx+1)
-		if len(s.TargetIncoming[key]) == 0 {
-			delete(s.TargetIncoming, key)
+		s.sinkCommit[key].Commit(ack)
+		s.SinkIncoming[key] = slices.Delete(s.SinkIncoming[key], idx, idx+1)
+		if len(s.SinkIncoming[key]) == 0 {
+			delete(s.SinkIncoming, key)
 		}
 
 		return nil
@@ -116,11 +115,11 @@ func (s *state) TargetCommit(msgs *v1.Msgs) error {
 // the sync should be restarted.
 // If lastSequence>0, the source should restart from lastSequence
 // If lastSequence=0, the source should restart the subscription
-func (s *state) TargetCommitReject(msgs *v1.Msgs, lastSequence uint64) error {
-	sub := getTargetSubscription(msgs)
-	key := sub.TargetSubscriptionKey
+func (s *state) SinkCommitReject(msgs *v1.Msgs, lastSequence uint64) error {
+	sub := getSinkSubscription(msgs)
+	key := sub.SinkSubscriptionKey
 
-	for idx, pendingMsgs := range s.TargetIncoming[key] {
+	for idx, pendingMsgs := range s.SinkIncoming[key] {
 		if pendingMsgs.GetSetId() != msgs.GetSetId() {
 			continue
 		}
@@ -141,17 +140,17 @@ func (s *state) TargetCommitReject(msgs *v1.Msgs, lastSequence uint64) error {
 			SourceStreamName: msgs.GetSourceStreamName(),
 			SequenceFrom:     lastSequence,
 			IsNak:            true,
-			Reason:           fmt.Sprintf("target rejected range %s, request restart (lastSequence %d)", seq.String(), lastSequence)}
+			Reason:           fmt.Sprintf("sink rejected range %s, request restart (lastSequence %d)", seq.String(), lastSequence)}
 
-		if _, exists := s.targetCommit[key]; !exists {
-			s.targetCommit[key] = &TargetCommitWindow{}
+		if _, exists := s.sinkCommit[key]; !exists {
+			s.sinkCommit[key] = &SinkCommitWindow{}
 		}
 
-		s.targetCommit[key].Commit(ack)
+		s.sinkCommit[key].Commit(ack)
 
-		s.TargetIncoming[key] = slices.Delete(s.TargetIncoming[key], idx, idx+1)
-		if len(s.TargetIncoming[key]) == 0 {
-			delete(s.TargetIncoming, key)
+		s.SinkIncoming[key] = slices.Delete(s.SinkIncoming[key], idx, idx+1)
+		if len(s.SinkIncoming[key]) == 0 {
+			delete(s.SinkIncoming, key)
 		}
 
 		return nil
@@ -160,40 +159,37 @@ func (s *state) TargetCommitReject(msgs *v1.Msgs, lastSequence uint64) error {
 	return errors.New("matching set ID not found")
 }
 
-type TargetSubscriptionKey struct {
-	SourceDeployment gateway.Deployment
+type SinkSubscriptionKey struct {
 	SourceStreamName string
 }
 
-type TargetSubscription struct {
-	TargetSubscriptionKey
+type SinkSubscription struct {
+	SinkSubscriptionKey
 
-	TargetDeployment gateway.Deployment
-	DeliverPolicy    jetstream.DeliverPolicy
-	OptStartSeq      uint64
-	OptStartTime     time.Time
-	FilterSubjects   []string
+	SinkDeployment gateway.Deployment
+	DeliverPolicy  jetstream.DeliverPolicy
+	OptStartSeq    uint64
+	OptStartTime   time.Time
+	FilterSubjects []string
 }
 
-func (x TargetSubscription) Equals(y TargetSubscription) bool {
-	return x.TargetSubscriptionKey == y.TargetSubscriptionKey &&
-		x.TargetDeployment == y.TargetDeployment &&
+func (x SinkSubscription) Equals(y SinkSubscription) bool {
+	return x.SinkSubscriptionKey == y.SinkSubscriptionKey &&
+		x.SinkDeployment == y.SinkDeployment &&
 		x.DeliverPolicy == y.DeliverPolicy &&
 		x.OptStartSeq == y.OptStartSeq &&
 		x.OptStartTime.Equal(y.OptStartTime) &&
 		slices.Equal(x.FilterSubjects, y.FilterSubjects)
 }
 
-func getTargetSubscription(msgs *v1.Msgs) TargetSubscription {
+func getSinkSubscription(msgs *v1.Msgs) SinkSubscription {
 	cc := msgs.GetConsumerConfig()
-	sub := TargetSubscription{
-		TargetSubscriptionKey: TargetSubscriptionKey{
-			SourceDeployment: gateway.Deployment(msgs.GetSourceDeployment()),
-			SourceStreamName: msgs.GetSourceStreamName()},
-		TargetDeployment: gateway.Deployment(msgs.GetTargetDeployment()),
-		DeliverPolicy:    ToDeliverPolicy(cc.GetDeliverPolicy()),
-		OptStartSeq:      cc.GetOptStartSeq(),
-		FilterSubjects:   msgs.GetFilterSubjects()}
+	sub := SinkSubscription{
+		SinkSubscriptionKey: SinkSubscriptionKey{SourceStreamName: msgs.GetSourceStreamName()},
+		SinkDeployment:      gateway.Deployment(msgs.GetSinkDeployment()),
+		DeliverPolicy:       ToDeliverPolicy(cc.GetDeliverPolicy()),
+		OptStartSeq:         cc.GetOptStartSeq(),
+		FilterSubjects:      msgs.GetFilterSubjects()}
 	slices.Sort(sub.FilterSubjects)
 
 	if sub.DeliverPolicy == jetstream.DeliverByStartTimePolicy {
@@ -202,14 +198,14 @@ func getTargetSubscription(msgs *v1.Msgs) TargetSubscription {
 	return sub
 }
 
-func fromTargetSubscription(sub TargetSubscription) *v1.ConsumerConfig {
+func fromSinkSubscription(sub SinkSubscription) *v1.ConsumerConfig {
 	return &v1.ConsumerConfig{
 		DeliverPolicy: FromDeliverPolicy(sub.DeliverPolicy),
 		OptStartSeq:   sub.OptStartSeq,
 		OptStartTime:  timestamppb.New(sub.OptStartTime)}
 }
 
-type TargetCommitWindow struct {
+type SinkCommitWindow struct {
 	// extrama, where From is the lowest sequence number committed and To is the highest
 	// received, but not yet committed
 	CommittedExtrema RangeInclusive[uint64]
@@ -226,7 +222,7 @@ type TargetCommitWindow struct {
 }
 
 // commit ack/nak (assuming the matching window has been picked)
-func (w *TargetCommitWindow) Commit(ack *v1.Acknowledge) {
+func (w *SinkCommitWindow) Commit(ack *v1.Acknowledge) {
 	if w.PendingAcks == nil {
 		w.PendingAcks = make(map[SetID]*v1.Acknowledge)
 	}
