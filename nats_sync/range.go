@@ -28,6 +28,19 @@ func (lhs RangeInclusive[T]) Contains(rhs RangeInclusive[T]) bool {
 	return true
 }
 
+// whether the 'lhs' contains the value
+func (lhs RangeInclusive[T]) ContainsValue(value T) bool {
+	if lhs.From < value {
+		return false
+	}
+
+	if lhs.To > value {
+		return false
+	}
+
+	return true
+}
+
 func (lhs RangeInclusive[T]) Overlaps(rhs RangeInclusive[T]) bool {
 	if lhs.From > rhs.To {
 		return false

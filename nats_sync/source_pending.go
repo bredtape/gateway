@@ -12,7 +12,7 @@ import (
 // pending per subscription
 type SourcePendingWindow struct {
 	// min Acknowledge From (inclusive) and max Pending To (inclusive)
-	Extrema RangeInclusive[uint64]
+	Extrema RangeInclusive[SourceSequence]
 
 	// pending acks
 	Pending map[SetID]SourcePendingAck
@@ -92,7 +92,7 @@ func (w *SourcePendingWindow) ReceiveAck(received time.Time, ack SourcePendingAc
 
 	if ack.IsNAK {
 		from := ack.SequenceRange.From
-		w.Extrema = RangeInclusive[uint64]{From: from, To: from}
+		w.Extrema = RangeInclusive[SourceSequence]{From: from, To: from}
 		pendings, to := w.getConsecutivePendingStartingFrom(from)
 
 		w.Pending = pendings
@@ -153,7 +153,7 @@ type SourcePendingAck struct {
 	SetID         SetID
 	IsNAK         bool
 	SentTimestamp time.Time
-	SequenceRange RangeInclusive[uint64]
+	SequenceRange RangeInclusive[SourceSequence]
 	Messages      []*v1.Msg
 }
 
@@ -168,19 +168,19 @@ func cmpPendingAckSequence(a, b SourcePendingAck) int {
 	return 0
 }
 
-func (w SourcePendingWindow) getPendingRanges() []RangeInclusive[uint64] {
-	ranges := make([]RangeInclusive[uint64], 0, len(w.Pending))
+func (w SourcePendingWindow) getPendingRanges() []RangeInclusive[SourceSequence] {
+	ranges := make([]RangeInclusive[SourceSequence], 0, len(w.Pending))
 	for _, p := range w.Pending {
 		ranges = append(ranges, p.SequenceRange)
 	}
 	return ranges
 }
 
-func (w SourcePendingWindow) getConsecutivePendingStartingFrom(from uint64) (map[SetID]SourcePendingAck, uint64) {
+func (w SourcePendingWindow) getConsecutivePendingStartingFrom(from SourceSequence) (map[SetID]SourcePendingAck, SourceSequence) {
 	pendings := make(map[SetID]SourcePendingAck, 0)
 	max := from
 
-	r := RangeInclusive[uint64]{From: from, To: from}
+	r := RangeInclusive[SourceSequence]{From: from, To: from}
 	for {
 		changes := false
 

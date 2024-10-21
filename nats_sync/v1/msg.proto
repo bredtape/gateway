@@ -29,17 +29,13 @@ message StartSyncRequest {
   // the sink deployment, where the messages are to be published.
   string sink_deployment = 2;
 
-  // source stream name
+  // source stream name. The stream could be mapped at the sink to whatever is needed.
   string source_stream_name = 3;
 
-  // sink stream name
-  // subject hierachy must match the source stream
-  string sink_stream_name = 4;
-
   // subscription filters used at the source for this stream
-  repeated string filter_subjects = 5;
+  repeated string filter_subjects = 4;
 
-  ConsumerConfig consumer_config = 6;
+  ConsumerConfig consumer_config = 5;
 }
 
 message StartSyncResponse {
@@ -52,14 +48,10 @@ message StartSyncResponse {
   // source stream name
   string source_stream_name = 3;
 
-  // sink stream name
-  // subject hierachy must match the source stream
-  string sink_stream_name = 4;
-
   // subscription filters used at the source for this stream
-  repeated string filter_subjects = 5;
+  repeated string filter_subjects = 4;
 
-  ConsumerConfig consumer_config = 6;
+  ConsumerConfig consumer_config = 5;
 }
 
 message StopSyncRequest {
@@ -72,12 +64,8 @@ message StopSyncRequest {
   // source stream name
   string source_stream_name = 3;
 
-  // sink stream name
-  // subject hierachy must match the source stream
-  string sink_stream_name = 4;
-
   // subscription filters used at the source for this stream
-  repeated string filter_subjects = 5;
+  repeated string filter_subjects = 4;
 }
 
 message StopSyncResponse {
@@ -90,13 +78,8 @@ message StopSyncResponse {
   // source stream name
   string source_stream_name = 3;
 
-  // sink stream name
-  // subject hierachy must match the source stream
-  string sink_stream_name = 4;
-
   // set of filters used at the source for this stream
-  repeated string filter_subjects = 5;
-
+  repeated string filter_subjects = 4;
 }
 
 // ConsumerConfig defines the configuration for message consumption
@@ -152,7 +135,7 @@ message Msg {
   uint64 sequence = 4;
 
   // when the Msg was published to the source.
-  google.protobuf.Timestamp publish_timestamp = 5;
+  google.protobuf.Timestamp published_timestamp = 5;
 }
 
 // messages belonging to the same deployment, source stream and subscription

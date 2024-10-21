@@ -15,12 +15,16 @@ import (
 
 var (
 	testDefaultComm = CommunicationSettings{
-		AckTimeoutPrSubscription:                 1 * time.Second,
-		AckRetryPrSubscription:                   retry.Must(retry.NewSeq(0, 2*time.Second, 5*time.Second)),
-		HeartbeatIntervalPrSubscription:          time.Minute,
-		MaxPendingAcksPrSubscription:             10,
-		MaxPendingIncomingMessagesPrSubscription: 10,
-		MaxAccumulatedPayloadSizeBytes:           1 << 10}
+		AckTimeoutPrSubscription:                             1 * time.Second,
+		AckRetryPrSubscription:                               retry.Must(retry.NewSeq(0, 2*time.Second, 5*time.Second)),
+		HeartbeatIntervalPrSubscription:                      time.Minute,
+		PendingAcksPrSubscriptionMax:                         10,
+		PendingIncomingMessagesPrSubscriptionMaxBuffered:     10,
+		PendingIncomingMessagesPrSubscriptionDeleteThreshold: 10,
+		MaxAccumulatedPayloadSizeBytes:                       1 << 10,
+		NatsOperationTimeout:                                 10 * time.Second,
+		BatchFlushTimeout:                                    100 * time.Millisecond,
+		ExchangeOperationTimeout:                             10 * time.Second}
 )
 
 func TestStateSourceBasic(t *testing.T) {
@@ -31,22 +35,21 @@ func TestStateSourceBasic(t *testing.T) {
 		So(err, ShouldBeNil)
 
 		msg1 := &v1.Msg{
-			Subject:          "x.y.z",
-			Data:             []byte("123"),
-			Sequence:         2,
-			PublishTimestamp: timestamppb.Now()}
+			Subject:            "x.y.z",
+			Data:               []byte("123"),
+			Sequence:           2,
+			PublishedTimestamp: timestamppb.Now()}
 		msg2 := &v1.Msg{
-			Subject:          "x.y.z",
-			Data:             []byte("123"),
-			Sequence:         4,
-			PublishTimestamp: timestamppb.Now()}
+			Subject:            "x.y.z",
+			Data:               []byte("123"),
+			Sequence:           4,
+			PublishedTimestamp: timestamppb.Now()}
 
 		Convey("register subscription, with this deployment as the source", func() {
 			req := &v1.StartSyncRequest{
 				SourceDeployment: from.String(),
 				SinkDeployment:   to.String(),
 				SourceStreamName: "stream1",
-				SinkStreamName:   "stream2",
 				ConsumerConfig: &v1.ConsumerConfig{
 					DeliverPolicy: v1.DeliverPolicy_DELIVER_POLICY_ALL}}
 			err := s.RegisterStartSync(req)
@@ -113,7 +116,7 @@ func TestStateSourceBasic(t *testing.T) {
 								SequenceFrom:     0,
 								SequenceTo:       2}
 
-							err := s.SourceHandleSinkAck(t1, t1, to, ack1)
+							err := s.SourceHandleSinkAck(t1, t1, ack1)
 							So(err, ShouldBeNil)
 
 							Convey("should have updated Subscriptions, to be deliver from sequence 2", func() {
@@ -149,7 +152,7 @@ func TestStateSourceBasic(t *testing.T) {
 								SequenceFrom:     0,
 								SequenceTo:       2}
 
-							err := s.SourceHandleSinkAck(t1, t1, to, ack2)
+							err := s.SourceHandleSinkAck(t1, t1, ack2)
 							So(err, ShouldBeNil)
 
 							Convey("should not have updated Subscriptions", func() {
@@ -181,7 +184,7 @@ func TestStateSourceBasic(t *testing.T) {
 										SequenceFrom:     0,
 										SequenceTo:       2}
 
-									err := s.SourceHandleSinkAck(t1, t1, to, ack1)
+									err := s.SourceHandleSinkAck(t1, t1, ack1)
 									So(err, ShouldBeNil)
 
 									Convey("should have updated Subscriptions, to be deliver from sequence 4", func() {
@@ -198,7 +201,7 @@ func TestStateSourceBasic(t *testing.T) {
 											SequenceFrom:     2,
 											SequenceTo:       4}
 
-										err := s.SourceHandleSinkAck(t1, t1, to, ack2)
+										err := s.SourceHandleSinkAck(t1, t1, ack2)
 										So(err, ShouldBeNil)
 									})
 								})
@@ -210,7 +213,7 @@ func TestStateSourceBasic(t *testing.T) {
 										SequenceFrom:     2,
 										SequenceTo:       4}
 
-									err := s.SourceHandleSinkAck(t1, t1, to, ack2)
+									err := s.SourceHandleSinkAck(t1, t1, ack2)
 									So(err, ShouldBeNil)
 
 									Convey("should have _not_ have updated Subscriptions", func() {
@@ -236,7 +239,7 @@ func TestStateSourceBackpressure(t *testing.T) {
 		from := gateway.Deployment("xx")
 		to := gateway.Deployment("yy")
 
-		maxPending := testDefaultComm.MaxPendingAcksPrSubscription
+		maxPending := testDefaultComm.PendingAcksPrSubscriptionMax
 		s, err := newState(from, to, testDefaultComm, nil)
 		So(err, ShouldBeNil)
 
@@ -249,7 +252,6 @@ func TestStateSourceBackpressure(t *testing.T) {
 				SourceDeployment: from.String(),
 				SinkDeployment:   to.String(),
 				SourceStreamName: "stream1",
-				SinkStreamName:   "stream2",
 				ConsumerConfig:   &v1.ConsumerConfig{DeliverPolicy: v1.DeliverPolicy_DELIVER_POLICY_ALL}}
 			err := s.RegisterStartSync(req)
 			So(err, ShouldBeNil)
@@ -260,10 +262,10 @@ func TestStateSourceBackpressure(t *testing.T) {
 				msgs := make([]*v1.Msg, 0)
 				for i := 0; i < maxPending; i++ {
 					msg := &v1.Msg{
-						Subject:          "x.y.z",
-						Data:             []byte("123"),
-						Sequence:         uint64(i + 1),
-						PublishTimestamp: timestamppb.Now()}
+						Subject:            "x.y.z",
+						Data:               []byte("123"),
+						Sequence:           uint64(i + 1),
+						PublishedTimestamp: timestamppb.Now()}
 					msgs = append(msgs, msg)
 				}
 
@@ -279,7 +281,7 @@ func TestStateSourceBackpressure(t *testing.T) {
 					msg := &v1.Msg{
 						Sequence: uint64(maxPending + 1),
 					}
-					count, err := s.SourceDeliverFromLocal(key, uint64(maxPending), msg)
+					count, err := s.SourceDeliverFromLocal(key, SourceSequence(maxPending), msg)
 
 					Convey("should have backoff error", func() {
 						So(err, ShouldNotBeNil)
@@ -320,7 +322,7 @@ func TestStateSourceBackpressure(t *testing.T) {
 						msg := &v1.Msg{
 							Sequence: uint64(maxPending + 1),
 						}
-						count, err := s.SourceDeliverFromLocal(key, uint64(maxPending), msg)
+						count, err := s.SourceDeliverFromLocal(key, SourceSequence(maxPending), msg)
 
 						Convey("should have backoff error", func() {
 							So(err, ShouldNotBeNil)
@@ -338,10 +340,10 @@ func TestStateSourceBackpressure(t *testing.T) {
 				msgs := make([]*v1.Msg, 0)
 				for i := 0; i < 8; i++ {
 					msg := &v1.Msg{
-						Subject:          "x.y.z",
-						Data:             []byte("123"),
-						Sequence:         uint64(i + 1),
-						PublishTimestamp: timestamppb.Now()}
+						Subject:            "x.y.z",
+						Data:               []byte("123"),
+						Sequence:           uint64(i + 1),
+						PublishedTimestamp: timestamppb.Now()}
 					msgs = append(msgs, msg)
 				}
 
@@ -357,10 +359,10 @@ func TestStateSourceBackpressure(t *testing.T) {
 					msgs := make([]*v1.Msg, 0)
 					for i := 0; i < 4; i++ {
 						msg := &v1.Msg{
-							Subject:          "x.y.z",
-							Data:             []byte("123"),
-							Sequence:         uint64(i + 9), // start from 9
-							PublishTimestamp: timestamppb.Now()}
+							Subject:            "x.y.z",
+							Data:               []byte("123"),
+							Sequence:           uint64(i + 9), // start from 9
+							PublishedTimestamp: timestamppb.Now()}
 						msgs = append(msgs, msg)
 					}
 
@@ -394,7 +396,6 @@ func TestStateSourceNAK(t *testing.T) {
 				SourceDeployment: from.String(),
 				SinkDeployment:   to.String(),
 				SourceStreamName: "stream1",
-				SinkStreamName:   "stream2",
 				ConsumerConfig: &v1.ConsumerConfig{
 					DeliverPolicy: v1.DeliverPolicy_DELIVER_POLICY_ALL}}
 			err := s.RegisterStartSync(req)
@@ -404,10 +405,10 @@ func TestStateSourceNAK(t *testing.T) {
 
 			Convey("deliver messages for stream1, starting from 0", func() {
 				msgs := []*v1.Msg{{
-					Subject:          "x.y.z",
-					Data:             []byte("123"),
-					Sequence:         11,
-					PublishTimestamp: timestamppb.Now()}}
+					Subject:            "x.y.z",
+					Data:               []byte("123"),
+					Sequence:           11,
+					PublishedTimestamp: timestamppb.Now()}}
 
 				_, err := s.SourceDeliverFromLocal(key, 0, msgs...)
 				So(err, ShouldBeNil)
@@ -428,7 +429,7 @@ func TestStateSourceNAK(t *testing.T) {
 							SequenceFrom:     0,
 							SequenceTo:       0}
 
-						err := s.SourceHandleSinkAck(time.Now(), time.Now(), to, nak)
+						err := s.SourceHandleSinkAck(time.Now(), time.Now(), nak)
 						So(err, ShouldBeNil)
 
 						Convey("should have updated Subscriptions, to be deliver from sequence 0", func() {
@@ -447,7 +448,7 @@ func TestStateSourceNAK(t *testing.T) {
 							SequenceFrom:     15,
 							SequenceTo:       0}
 
-						err := s.SourceHandleSinkAck(time.Now(), time.Now(), to, nak)
+						err := s.SourceHandleSinkAck(time.Now(), time.Now(), nak)
 						So(err, ShouldBeNil)
 
 						Convey("should have updated Subscriptions, to be deliver from sequence 15", func() {
@@ -459,10 +460,10 @@ func TestStateSourceNAK(t *testing.T) {
 
 						Convey("deliver messages for stream1, starting from 15", func() {
 							msg2 := &v1.Msg{
-								Subject:          "x.y.z",
-								Data:             []byte("123"),
-								Sequence:         16,
-								PublishTimestamp: timestamppb.Now()}
+								Subject:            "x.y.z",
+								Data:               []byte("123"),
+								Sequence:           16,
+								PublishedTimestamp: timestamppb.Now()}
 
 							_, err := s.SourceDeliverFromLocal(key, 15, msg2)
 							So(err, ShouldBeNil)
@@ -482,7 +483,7 @@ func TestStateSourceNAK(t *testing.T) {
 										SequenceFrom:     15,
 										SequenceTo:       16}
 
-									err := s.SourceHandleSinkAck(time.Now(), time.Now(), to, ack)
+									err := s.SourceHandleSinkAck(time.Now(), time.Now(), ack)
 									So(err, ShouldBeNil)
 
 									Convey("should have updated Subscriptions, to be deliver from sequence 16", func() {
@@ -509,7 +510,7 @@ func TestStateSourceInit(t *testing.T) {
 		from := gateway.Deployment("xx")
 		to := gateway.Deployment("yy")
 		key := SourceSubscriptionKey{SourceStreamName: "stream1"}
-		s, err := newState(from, to, testDefaultComm, map[SourceSubscriptionKey]uint64{key: 15})
+		s, err := newState(from, to, testDefaultComm, map[SourceSubscriptionKey]SourceSequence{key: 15})
 		So(err, ShouldBeNil)
 
 		Convey("register subscription, with this deployment as the source", func() {
@@ -517,7 +518,6 @@ func TestStateSourceInit(t *testing.T) {
 				SourceDeployment: from.String(),
 				SinkDeployment:   to.String(),
 				SourceStreamName: "stream1",
-				SinkStreamName:   "stream2",
 				ConsumerConfig: &v1.ConsumerConfig{
 					DeliverPolicy: v1.DeliverPolicy_DELIVER_POLICY_ALL}}
 			err := s.RegisterStartSync(req)
@@ -525,10 +525,10 @@ func TestStateSourceInit(t *testing.T) {
 
 			Convey("deliver messages for stream1, starting from 15", func() {
 				msgs := []*v1.Msg{{
-					Subject:          "x.y.z",
-					Data:             []byte("123"),
-					Sequence:         16,
-					PublishTimestamp: timestamppb.Now()}}
+					Subject:            "x.y.z",
+					Data:               []byte("123"),
+					Sequence:           16,
+					PublishedTimestamp: timestamppb.Now()}}
 
 				_, err := s.SourceDeliverFromLocal(key, 15, msgs...)
 				So(err, ShouldBeNil)
@@ -549,7 +549,7 @@ func TestStateSourceInit(t *testing.T) {
 							SourceStreamName: "stream1",
 							SequenceFrom:     25}
 
-						err := s.SourceHandleSinkAck(time.Now(), time.Now(), to, nak)
+						err := s.SourceHandleSinkAck(time.Now(), time.Now(), nak)
 						So(err, ShouldBeNil)
 
 						Convey("should have updated Subscriptions, to be deliver from sequence 25", func() {
@@ -562,10 +562,10 @@ func TestStateSourceInit(t *testing.T) {
 
 					Convey("deliver another message for stream1", func() {
 						msg3 := &v1.Msg{
-							Subject:          "x.y.z",
-							Data:             []byte("123"),
-							Sequence:         17,
-							PublishTimestamp: timestamppb.Now()}
+							Subject:            "x.y.z",
+							Data:               []byte("123"),
+							Sequence:           17,
+							PublishedTimestamp: timestamppb.Now()}
 
 						_, err := s.SourceDeliverFromLocal(key, 16, msg3)
 						So(err, ShouldBeNil)
@@ -578,15 +578,15 @@ func TestStateSourceInit(t *testing.T) {
 								SequenceFrom:     25,
 								SequenceTo:       0}
 
-							err := s.SourceHandleSinkAck(time.Now(), time.Now(), to, nak)
+							err := s.SourceHandleSinkAck(time.Now(), time.Now(), nak)
 							So(err, ShouldBeNil)
 
 							Convey("deliver message from 25", func() {
 								msg3 := &v1.Msg{
-									Subject:          "x.y.z",
-									Data:             []byte("123"),
-									Sequence:         26,
-									PublishTimestamp: timestamppb.Now()}
+									Subject:            "x.y.z",
+									Data:               []byte("123"),
+									Sequence:           26,
+									PublishedTimestamp: timestamppb.Now()}
 
 								_, err := s.SourceDeliverFromLocal(key, 25, msg3)
 								So(err, ShouldBeNil)
@@ -609,15 +609,15 @@ func TestStateSourceInit(t *testing.T) {
 									SequenceFrom:     25,
 									SequenceTo:       0}
 
-								err := s.SourceHandleSinkAck(time.Now(), time.Now(), to, nak1)
+								err := s.SourceHandleSinkAck(time.Now(), time.Now(), nak1)
 								So(err, ShouldBeNil)
 
 								Convey("deliver message from 25", func() {
 									msg3 := &v1.Msg{
-										Subject:          "x.y.z",
-										Data:             []byte("123"),
-										Sequence:         26,
-										PublishTimestamp: timestamppb.Now()}
+										Subject:            "x.y.z",
+										Data:               []byte("123"),
+										Sequence:           26,
+										PublishedTimestamp: timestamppb.Now()}
 
 									_, err := s.SourceDeliverFromLocal(key, 25, msg3)
 									So(err, ShouldBeNil)
@@ -644,7 +644,7 @@ func TestStateSourceInit(t *testing.T) {
 												SequenceFrom:     25,
 												SequenceTo:       0}
 
-											err := s.SourceHandleSinkAck(time.Now(), time.Now(), to, nak2)
+											err := s.SourceHandleSinkAck(time.Now(), time.Now(), nak2)
 											So(err, ShouldBeNil)
 
 											Convey("should not reset subscription", func() {
@@ -656,10 +656,10 @@ func TestStateSourceInit(t *testing.T) {
 
 											Convey("deliver message from 26", func() {
 												msg3 := &v1.Msg{
-													Subject:          "x.y.z",
-													Data:             []byte("123"),
-													Sequence:         27,
-													PublishTimestamp: timestamppb.Now()}
+													Subject:            "x.y.z",
+													Data:               []byte("123"),
+													Sequence:           27,
+													PublishedTimestamp: timestamppb.Now()}
 
 												_, err := s.SourceDeliverFromLocal(key, 26, msg3)
 												So(err, ShouldBeNil)
@@ -679,7 +679,7 @@ func TestStateSourceInit(t *testing.T) {
 											SequenceFrom:     25,
 											SequenceTo:       0}
 
-										err := s.SourceHandleSinkAck(time.Now(), time.Now(), to, nak2)
+										err := s.SourceHandleSinkAck(time.Now(), time.Now(), nak2)
 										So(err, ShouldBeNil)
 
 										Convey("should not reset subscription", func() {
@@ -721,7 +721,6 @@ func TestStateSourceAckTimeout(t *testing.T) {
 				SourceDeployment: from.String(),
 				SinkDeployment:   to.String(),
 				SourceStreamName: "stream1",
-				SinkStreamName:   "stream2",
 				ConsumerConfig:   &v1.ConsumerConfig{DeliverPolicy: v1.DeliverPolicy_DELIVER_POLICY_ALL}}
 			err := s.RegisterStartSync(req)
 			So(err, ShouldBeNil)
@@ -835,7 +834,6 @@ func TestStateSourceHeartbeat(t *testing.T) {
 				SourceDeployment: from.String(),
 				SinkDeployment:   to.String(),
 				SourceStreamName: "stream1",
-				SinkStreamName:   "stream2",
 				ConsumerConfig:   &v1.ConsumerConfig{DeliverPolicy: v1.DeliverPolicy_DELIVER_POLICY_ALL}}
 			err := s.RegisterStartSync(req)
 			So(err, ShouldBeNil)
@@ -868,7 +866,7 @@ func TestStateSourceHeartbeat(t *testing.T) {
 							SequenceFrom:     0,
 							SequenceTo:       1}
 
-						err := s.SourceHandleSinkAck(t1, t1, to, ack1)
+						err := s.SourceHandleSinkAck(t1, t1, ack1)
 						So(err, ShouldBeNil)
 
 						Convey("no ack received within heartbeat interval (1 min), should send heartbeat after 1 min", func() {
@@ -961,7 +959,6 @@ func TestStateSourceMaxPayloadSize(t *testing.T) {
 				SourceDeployment: from.String(),
 				SinkDeployment:   to.String(),
 				SourceStreamName: "stream1",
-				SinkStreamName:   "stream2",
 				ConsumerConfig: &v1.ConsumerConfig{
 					DeliverPolicy: v1.DeliverPolicy_DELIVER_POLICY_ALL}}
 			err := s.RegisterStartSync(req)

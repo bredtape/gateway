@@ -42,10 +42,10 @@ func TestFileIO(t *testing.T) {
 	assert.NoError(t, err)
 
 	msg1 := &v1.Msg{
-		Subject:          "x.y.z",
-		Data:             []byte("123"),
-		Sequence:         2,
-		PublishTimestamp: timestamppb.New(time.Date(2021, 1, 1, 0, 0, 0, 0, time.UTC))}
+		Subject:            "x.y.z",
+		Data:               []byte("123"),
+		Sequence:           2,
+		PublishedTimestamp: timestamppb.New(time.Date(2021, 1, 1, 0, 0, 0, 0, time.UTC))}
 	batch1 := &v1.MessageBatch{
 		ListOfMessages: []*v1.Msgs{
 			{
@@ -88,10 +88,10 @@ func TestFileIOWatchAfterWrite(t *testing.T) {
 	assert.NoError(t, err)
 
 	msg1 := &v1.Msg{
-		Subject:          "x.y.z",
-		Data:             []byte("123"),
-		Sequence:         2,
-		PublishTimestamp: timestamppb.New(time.Date(2021, 1, 1, 0, 0, 0, 0, time.UTC))}
+		Subject:            "x.y.z",
+		Data:               []byte("123"),
+		Sequence:           2,
+		PublishedTimestamp: timestamppb.New(time.Date(2021, 1, 1, 0, 0, 0, 0, time.UTC))}
 	batch1 := &v1.MessageBatch{
 		ListOfMessages: []*v1.Msgs{
 			{

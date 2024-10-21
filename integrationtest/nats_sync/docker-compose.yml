@@ -1,0 +1,67 @@
+
+volumes:
+  nats-dataA:
+  nats-dataB:
+  file-outA:
+  file-inA:
+
+services:
+  syncA:
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+    environment:
+      NATS_SYNC_LOG_LEVEL: debug-3
+      NATS_SYNC_FROM: a
+      NATS_SYNC_TO: b
+      NATS_URL: nats://natsA:4222
+      NATS_SUBJECT: sync
+      NATS_SYNC_FILE_EXCHANGE_ENABLED: true
+      NATS_SYNC_FILE_IN_DIR: /data/in
+      NATS_SYNC_FILE_OUT_DIR: /data/out
+    volumes:
+      - file-inA:/data/in
+      - file-outA:/data/out
+
+  natsA:
+    image: ${NATS_IMAGE}
+    command:
+      --debug
+      --name natsA
+      --jetstream
+      --store_dir /data
+    volumes:
+      - nats-dataA:/data
+    ports:
+      - "4222:4222"
+
+  syncB:
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+    environment:
+      NATS_SYNC_LOG_LEVEL: debug-3
+      NATS_SYNC_FROM: b
+      NATS_SYNC_TO: a
+      NATS_URL: nats://natsB:4222
+      NATS_SUBJECT: sync
+      NATS_SYNC_FILE_EXCHANGE_ENABLED: true
+      NATS_SYNC_FILE_IN_DIR: /data/in
+      NATS_SYNC_FILE_OUT_DIR: /data/out
+    volumes:
+      - file-inA:/data/out # reverse direction
+      - file-outA:/data/in # reverse direction
+
+
+  natsB:
+    image: ${NATS_IMAGE}
+    command:
+      --debug
+      --name natsB
+      --jetstream
+      --store_dir /data
+    volumes:
+      - nats-dataB:/data
+    ports:
+      - "4322:4222" # non-standard port
+

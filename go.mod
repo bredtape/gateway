@@ -20,11 +20,14 @@ require (
 )
 
 require (
+	github.com/bredtape/set v0.0.3
+	github.com/bredtape/slogging v0.0.0-20240412063852-f039b2c82b7f
 	github.com/davecgh/go-spew v1.1.1 // indirect
 	github.com/google/uuid v1.6.0
 	github.com/klauspost/compress v1.17.11 // indirect
 	github.com/nats-io/nkeys v0.4.7 // indirect
 	github.com/nats-io/nuid v1.0.1 // indirect
+	github.com/peterbourgon/ff/v3 v3.4.0
 	github.com/pmezard/go-difflib v1.0.0 // indirect
 	github.com/smartystreets/goconvey v1.8.1
 	golang.org/x/crypto v0.28.0 // indirect

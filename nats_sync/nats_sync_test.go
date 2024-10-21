@@ -74,7 +74,7 @@ func TestNatsSyncLowLevelSync(t *testing.T) {
 		AckRetryPrSubscription:          retry.Must(retry.NewExp(0.2, 10*time.Millisecond, 500*time.Millisecond)),
 		HeartbeatIntervalPrSubscription: 100 * time.Millisecond,
 		MaxAccumulatedPayloadSizeBytes:  4 << 20, // 4 MB
-		MaxPendingAcksPrSubscription:    5}
+		PendingAcksPrSubscriptionMax:    5}
 
 	// deployment A
 	var clientA *NatsSyncClient
@@ -172,8 +172,7 @@ func TestNatsSyncLowLevelSync(t *testing.T) {
 		sub := &v1.StartSyncRequest{
 			SourceDeployment: da.String(),
 			SinkDeployment:   db.String(),
-			SourceStreamName: appStreamA,
-			SinkStreamName:   appStreamB}
+			SourceStreamName: appStreamA}
 		_, err := clientA.publishStartSyncRequest(ctx, sub)
 		assert.NoError(t, err)
 

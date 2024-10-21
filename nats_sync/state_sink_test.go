@@ -20,22 +20,21 @@ func TestStateSinkBasic(t *testing.T) {
 		So(err, ShouldBeNil)
 
 		msg1 := &v1.Msg{
-			Subject:          "x.y.z",
-			Data:             []byte("123"),
-			Sequence:         2,
-			PublishTimestamp: timestamppb.Now()}
+			Subject:            "x.y.z",
+			Data:               []byte("123"),
+			Sequence:           2,
+			PublishedTimestamp: timestamppb.Now()}
 		msg2 := &v1.Msg{
-			Subject:          "x.y.z",
-			Data:             []byte("123"),
-			Sequence:         4,
-			PublishTimestamp: timestamppb.Now()}
+			Subject:            "x.y.z",
+			Data:               []byte("123"),
+			Sequence:           4,
+			PublishedTimestamp: timestamppb.Now()}
 
 		Convey("register subscription, with this deployment as the sink", func() {
 			req := &v1.StartSyncRequest{
 				SourceDeployment: from.String(),
 				SinkDeployment:   to.String(),
 				SourceStreamName: "stream1",
-				SinkStreamName:   "stream2",
 				ConsumerConfig:   &v1.ConsumerConfig{DeliverPolicy: v1.DeliverPolicy_DELIVER_POLICY_ALL}}
 			err := s.RegisterStartSync(req)
 			So(err, ShouldBeNil)
@@ -190,8 +189,8 @@ func TestStateSinkBackpressure(t *testing.T) {
 		s, err := newState(to, from, testDefaultComm, nil)
 		So(err, ShouldBeNil)
 
-		maxPending := testDefaultComm.MaxPendingIncomingMessagesPrSubscription
-		Convey("check that MaxPendingIncomingMessagesPrSubscription is 10", func() {
+		maxPending := testDefaultComm.PendingIncomingMessagesPrSubscriptionMaxBuffered
+		Convey("check that 'PendingIncomingMessagesPrSubscriptionMaxBuffered' is 10", func() {
 			So(maxPending, ShouldEqual, 10)
 		})
 
@@ -200,7 +199,6 @@ func TestStateSinkBackpressure(t *testing.T) {
 				SourceDeployment: "xx",
 				SinkDeployment:   "yy",
 				SourceStreamName: "stream1",
-				SinkStreamName:   "stream2",
 				ConsumerConfig:   &v1.ConsumerConfig{DeliverPolicy: v1.DeliverPolicy_DELIVER_POLICY_ALL}}
 			err := s.RegisterStartSync(req)
 			So(err, ShouldBeNil)
@@ -211,10 +209,10 @@ func TestStateSinkBackpressure(t *testing.T) {
 				xs := make([]*v1.Msg, 0)
 				for i := 0; i < maxPending; i++ {
 					xs = append(xs, &v1.Msg{
-						Subject:          "x.y.z",
-						Data:             []byte("123"),
-						Sequence:         uint64(i + 1),
-						PublishTimestamp: timestamppb.Now()})
+						Subject:            "x.y.z",
+						Data:               []byte("123"),
+						Sequence:           uint64(i + 1),
+						PublishedTimestamp: timestamppb.Now()})
 				}
 
 				msgs1 := &v1.Msgs{
@@ -252,10 +250,10 @@ func TestStateSinkBackpressure(t *testing.T) {
 						ConsumerConfig:   &v1.ConsumerConfig{DeliverPolicy: v1.DeliverPolicy_DELIVER_POLICY_ALL},
 						LastSequence:     10,
 						Messages: []*v1.Msg{{
-							Subject:          "x.y.z",
-							Data:             []byte("123"),
-							Sequence:         11,
-							PublishTimestamp: timestamppb.Now()}}}
+							Subject:            "x.y.z",
+							Data:               []byte("123"),
+							Sequence:           11,
+							PublishedTimestamp: timestamppb.Now()}}}
 
 					t1 := time.Now()
 					err := s.SinkDeliverFromRemote(t1, msgs2)
@@ -287,7 +285,6 @@ func TestStateSinkNak(t *testing.T) {
 				SourceDeployment: from.String(),
 				SinkDeployment:   to.String(),
 				SourceStreamName: "stream1",
-				SinkStreamName:   "stream2",
 				ConsumerConfig:   &v1.ConsumerConfig{DeliverPolicy: v1.DeliverPolicy_DELIVER_POLICY_ALL}}
 			err := s.RegisterStartSync(req)
 			So(err, ShouldBeNil)
@@ -297,10 +294,10 @@ func TestStateSinkNak(t *testing.T) {
 			Convey("deliver a msg with last sequence>0", func() {
 
 				msg := &v1.Msg{
-					Subject:          "x.y.z",
-					Data:             []byte("123"),
-					Sequence:         31,
-					PublishTimestamp: timestamppb.Now()}
+					Subject:            "x.y.z",
+					Data:               []byte("123"),
+					Sequence:           31,
+					PublishedTimestamp: timestamppb.Now()}
 
 				msgs1 := &v1.Msgs{
 					SetId:            NewSetID().String(),

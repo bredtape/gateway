@@ -40,8 +40,8 @@ func (s *state) SinkDeliverFromRemote(t time.Time, msgs *v1.Msgs) error {
 		c += len(m.GetMessages())
 	}
 
-	if c > s.cs.MaxPendingIncomingMessagesPrSubscription {
-		return errors.Wrapf(ErrBackoff, "max pending incoming messages (%d) reached", s.cs.MaxPendingIncomingMessagesPrSubscription)
+	if c > s.cs.PendingIncomingMessagesPrSubscriptionMaxBuffered {
+		return errors.Wrapf(ErrBackoff, "max pending incoming messages (%d) reached", s.cs.PendingIncomingMessagesPrSubscriptionMaxBuffered)
 	}
 
 	// all checks passed, add to incoming
@@ -55,8 +55,8 @@ func (s *state) SinkDeliverFromRemote(t time.Time, msgs *v1.Msgs) error {
 }
 
 // commit set of incoming messages (which mean they have been persisted at the sink).
-// Incoming messages will not be deleted, if an error is returned
-// Messages but be persisted with source-sequence
+// Incoming messages will not be deleted, if an error is returned.
+// Messages must be persisted with source-sequence
 func (s *state) SinkCommit(msgs *v1.Msgs) error {
 	sub := getSinkSubscription(msgs)
 	key := sub.SinkSubscriptionKey
@@ -115,7 +115,7 @@ func (s *state) SinkCommit(msgs *v1.Msgs) error {
 // the sync should be restarted.
 // If lastSequence>0, the source should restart from lastSequence
 // If lastSequence=0, the source should restart the subscription
-func (s *state) SinkCommitReject(msgs *v1.Msgs, lastSequence uint64) error {
+func (s *state) SinkCommitReject(msgs *v1.Msgs, lastSequence SourceSequence) error {
 	sub := getSinkSubscription(msgs)
 	key := sub.SinkSubscriptionKey
 
@@ -138,7 +138,7 @@ func (s *state) SinkCommitReject(msgs *v1.Msgs, lastSequence uint64) error {
 		ack := &v1.Acknowledge{
 			SetId:            msgs.GetSetId(),
 			SourceStreamName: msgs.GetSourceStreamName(),
-			SequenceFrom:     lastSequence,
+			SequenceFrom:     uint64(lastSequence),
 			IsNak:            true,
 			Reason:           fmt.Sprintf("sink rejected range %s, request restart (lastSequence %d)", seq.String(), lastSequence)}
 

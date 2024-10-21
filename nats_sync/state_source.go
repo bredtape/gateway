@@ -33,7 +33,7 @@ func (s *state) GetSourceLocalSubscriptions(key SourceSubscriptionKey) (SourceSu
 		return SourceSubscription{
 			SourceSubscriptionKey: key,
 			DeliverPolicy:         jetstream.DeliverByStartSequencePolicy,
-			OptStartSeq:           w.Extrema.To,
+			OptStartSeq:           uint64(w.Extrema.To),
 			FilterSubjects:        sub.FilterSubjects}, true
 	}
 
@@ -54,7 +54,7 @@ type SourceLocalMessages struct {
 // If more messages are attempted to be delivered than outgoing and pending,
 // an error of ErrBackoff is returned. Messages may be partial delivered, indicated
 // by the returned count!
-func (s *state) SourceDeliverFromLocal(key SourceSubscriptionKey, lastSequence uint64, messages ...*v1.Msg) (int, error) {
+func (s *state) SourceDeliverFromLocal(key SourceSubscriptionKey, lastSequence SourceSequence, messages ...*v1.Msg) (int, error) {
 	if _, exists := s.sourceOriginalSubscription[key]; !exists {
 		return 0, errors.Wrapf(ErrNoSubscription, "no local subscription for key %v", key)
 	}
@@ -62,7 +62,7 @@ func (s *state) SourceDeliverFromLocal(key SourceSubscriptionKey, lastSequence u
 	// backoff
 	acceptCount := s.sourceCalculateAcceptCount(key, lastSequence == 0)
 	if acceptCount == 0 {
-		return 0, errors.Wrapf(ErrBackoff, "max pending acks (%d) reached, only accepting %d", s.cs.MaxPendingAcksPrSubscription, acceptCount)
+		return 0, errors.Wrapf(ErrBackoff, "max pending acks (%d) reached, only accepting %d", s.cs.PendingAcksPrSubscriptionMax, acceptCount)
 	}
 	if acceptCount > len(messages) {
 		acceptCount = len(messages)
@@ -78,7 +78,7 @@ func (s *state) SourceDeliverFromLocal(key SourceSubscriptionKey, lastSequence u
 
 		// lastSequence must match the last pending message
 		if len(pendingMessages) > 0 {
-			seq := pendingMessages[len(pendingMessages)-1].GetSequence()
+			seq := SourceSequence(pendingMessages[len(pendingMessages)-1].GetSequence())
 			if seq != lastSequence {
 				return 0, errors.Wrapf(ErrSourceSequenceBroken, "last sequence %d does not match last message %d", lastSequence, seq)
 			}
@@ -96,7 +96,7 @@ func (s *state) SourceDeliverFromLocal(key SourceSubscriptionKey, lastSequence u
 	if lastSequence > 0 {
 		xs := s.sourceOutgoing[key]
 		if len(xs) > 0 {
-			lastMessageSeq := xs[len(xs)-1].GetSequence()
+			lastMessageSeq := SourceSequence(xs[len(xs)-1].GetSequence())
 			if lastMessageSeq != lastSequence {
 				return 0, errors.Wrapf(ErrSourceSequenceBroken, "last sequence %d does not match last message %d", lastSequence, lastMessageSeq)
 			}
@@ -119,7 +119,7 @@ func (s *state) SourceDeliverFromLocal(key SourceSubscriptionKey, lastSequence u
 		}
 	}
 
-	if len(messages) > 0 && messages[0].Sequence <= lastSequence {
+	if len(messages) > 0 && SourceSequence(messages[0].Sequence) <= lastSequence {
 		return 0, errors.Wrapf(ErrSourceSequenceBroken, "message sequence %d must be after lastSequence %d", messages[0].Sequence, lastSequence)
 	}
 
@@ -136,7 +136,7 @@ func (s *state) SourceDeliverFromLocal(key SourceSubscriptionKey, lastSequence u
 		w.Extrema.From = 0
 	}
 
-	w.Extrema.To = messages[acceptCount-1].GetSequence()
+	w.Extrema.To = SourceSequence(messages[acceptCount-1].GetSequence())
 
 	// prune existing messages if subscription was restarted
 	if s.sourceOutgoing == nil || lastSequence == 0 {
@@ -146,7 +146,7 @@ func (s *state) SourceDeliverFromLocal(key SourceSubscriptionKey, lastSequence u
 	s.sourceOutgoing[key] = append(s.sourceOutgoing[key], messages[:acceptCount]...)
 
 	if acceptCount < len(messages) {
-		return acceptCount, errors.Wrapf(ErrBackoff, "max pending acks (%d) reached, only accepting %d", s.cs.MaxPendingAcksPrSubscription, acceptCount)
+		return acceptCount, errors.Wrapf(ErrBackoff, "max pending acks (%d) reached, only accepting %d", s.cs.PendingAcksPrSubscriptionMax, acceptCount)
 	}
 	return acceptCount, nil
 }
@@ -180,7 +180,7 @@ func (s *state) packMessages(payloadCapacity int, key SourceSubscriptionKey) []*
 	}
 
 	if w, exists := s.sourceAckWindows[key]; exists {
-		b.LastSequence = w.Extrema.To
+		b.LastSequence = uint64(w.Extrema.To)
 	}
 
 	if len(b.Messages) == 0 {
@@ -210,7 +210,7 @@ func (s *state) repackMessages(key SourceSubscriptionKey, ids []SetID) []*v1.Msg
 			SinkDeployment:   s.to.String(),
 			SourceStreamName: key.SourceStreamName,
 			ConsumerConfig:   fromSourceSubscription(s.sourceOriginalSubscription[key]),
-			LastSequence:     pending.SequenceRange.From,
+			LastSequence:     uint64(pending.SequenceRange.From),
 			Messages:         pending.Messages})
 	}
 	return result
@@ -218,7 +218,7 @@ func (s *state) repackMessages(key SourceSubscriptionKey, ids []SetID) []*v1.Msg
 
 // handle incoming ack from sink deployment
 // ack may be out or order (so the sequence from/to are out of order)
-func (s *state) SourceHandleSinkAck(currentTime, sentTime time.Time, sinkDeployment gateway.Deployment, ack *v1.Acknowledge) error {
+func (s *state) SourceHandleSinkAck(currentTime, sentTime time.Time, ack *v1.Acknowledge) error {
 	key := SourceSubscriptionKey{SourceStreamName: ack.GetSourceStreamName()}
 
 	_, exists := s.sourceOriginalSubscription[key]
@@ -236,9 +236,9 @@ func (s *state) SourceHandleSinkAck(currentTime, sentTime time.Time, sinkDeploym
 		SetID:         SetID(ack.GetSetId()),
 		IsNAK:         ack.GetIsNak(),
 		SentTimestamp: sentTime,
-		SequenceRange: RangeInclusive[uint64]{
-			From: ack.GetSequenceFrom(),
-			To:   ack.GetSequenceTo()},
+		SequenceRange: RangeInclusive[SourceSequence]{
+			From: SourceSequence(ack.GetSequenceFrom()),
+			To:   SourceSequence(ack.GetSequenceTo())},
 		// Messages not specified
 	}
 
@@ -253,9 +253,9 @@ func (s *state) SourceHandleSinkAck(currentTime, sentTime time.Time, sinkDeploym
 	if p.IsNAK {
 		// keep messages from Extrema.To, if found
 		if w.Extrema.To > 0 {
-			keepers := keepMessagesFrom(s.sourceOutgoing[key], w.Extrema.To)
+			keepers := keepMessagesFrom(s.sourceOutgoing[key], uint64(w.Extrema.To))
 			if len(keepers) > 0 {
-				w.Extrema.To = keepers[len(keepers)-1].GetSequence()
+				w.Extrema.To = SourceSequence(keepers[len(keepers)-1].GetSequence())
 			}
 			s.sourceOutgoing[key] = keepers
 		} else {
@@ -317,7 +317,7 @@ func (s *state) sourceCalculateAcceptCount(key SourceSubscriptionKey, isReset bo
 		}
 	}
 
-	count := s.cs.MaxPendingAcksPrSubscription
+	count := s.cs.PendingAcksPrSubscriptionMax
 	if !isReset {
 		count -= len(s.sourceOutgoing[key])
 		count -= pendingAckCount

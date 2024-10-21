@@ -109,7 +109,7 @@ type state struct {
 // and 'to' sources messages to sink 'from'.
 // The initialSourceSequences is optional and specify the last sequence number acknowledged for each source stream
 func newState(from, to gateway.Deployment, cs CommunicationSettings,
-	initialSourceSequences map[SourceSubscriptionKey]uint64) (*state, error) {
+	initialSourceSequences map[SourceSubscriptionKey]SourceSequence) (*state, error) {
 	if from == to {
 		return nil, errors.New("from and to must be different")
 	}
@@ -127,7 +127,7 @@ func newState(from, to gateway.Deployment, cs CommunicationSettings,
 
 	for sub, seq := range initialSourceSequences {
 		s.sourceAckWindows[sub] = &SourcePendingWindow{
-			Extrema: RangeInclusive[uint64]{From: seq, To: seq}}
+			Extrema: RangeInclusive[SourceSequence]{From: seq, To: seq}}
 	}
 
 	return s, s.Validate()
@@ -168,7 +168,7 @@ func (s *state) RegisterStartSync(req *v1.StartSyncRequest) error {
 		if w, exists := s.sourceAckWindows[sub.SourceSubscriptionKey]; exists {
 			if w.Extrema.From > 0 {
 				sub.DeliverPolicy = jetstream.DeliverByStartSequencePolicy
-				sub.OptStartSeq = w.Extrema.From
+				sub.OptStartSeq = uint64(w.Extrema.From)
 			}
 		}
 		return nil
@@ -266,7 +266,7 @@ func (s *state) CreateMessageBatch(now time.Time) (*v1.MessageBatch, error) {
 			SourceDeployment: s.from.String(),
 			SinkDeployment:   s.to.String(),
 			SourceStreamName: key.SourceStreamName,
-			LastSequence:     w.Extrema.To,
+			LastSequence:     uint64(w.Extrema.To),
 			ConsumerConfig:   fromSourceSubscription(sub)})
 	}
 
@@ -347,13 +347,13 @@ func (s *state) MarkDispatched(b *v1.MessageBatch) DispatchReport {
 		ack := SourcePendingAck{
 			SetID:         SetID(msgs.GetSetId()),
 			SentTimestamp: b.GetSentTimestamp().AsTime(),
-			SequenceRange: RangeInclusive[uint64]{
-				From: msgs.GetLastSequence(),
-				To:   msgs.GetLastSequence()},
+			SequenceRange: RangeInclusive[SourceSequence]{
+				From: SourceSequence(msgs.GetLastSequence()),
+				To:   SourceSequence(msgs.GetLastSequence())},
 			Messages: msgs.GetMessages()}
 
 		if len(msgs.GetMessages()) > 0 {
-			ack.SequenceRange.To = msgs.GetMessages()[len(msgs.GetMessages())-1].GetSequence()
+			ack.SequenceRange.To = SourceSequence(msgs.GetMessages()[len(msgs.GetMessages())-1].GetSequence())
 		}
 
 		err := w.MarkDispatched(ack)
@@ -363,7 +363,7 @@ func (s *state) MarkDispatched(b *v1.MessageBatch) DispatchReport {
 
 		// only remove messages included in the batch
 		xs := s.sourceOutgoing[key]
-		idx, found := findSequenceIndex(xs, ack.SequenceRange.To)
+		idx, found := findSequenceIndex(xs, uint64(ack.SequenceRange.To))
 		if found && (idx+1) < len(xs) {
 			s.sourceOutgoing[key] = xs[idx+1:]
 		} else {
