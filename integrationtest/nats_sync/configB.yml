@@ -1,0 +1,27 @@
+deployment: a
+syncStream: sync
+
+deploymentSettings:
+  b:
+    fileExchangeEnabled: true
+    fileExchangeConfig:
+      incomingDir: /data/in
+      outgoingDir: /data/out
+
+defaultSettings:
+  ackTimeout: 5s
+  ackRetryJitter: 0.2
+  ackRetryStep: 1s
+  ackRetryMax: 60s
+  heartbeatInterval: 2m
+  pendingAcksMax: 1000
+  pendingIncomingMessagesMaxBuffered: 5000
+  pendingIncomingMessagesDeleteThreshold: 1000
+  maxAccumulatedPayloadSizeBytes: 4_194_304 # 4MB
+  natsOperationTimeout: 5s
+  batchFlushTimeout: 1s
+  exchangeOperationTimeout: 5s
+  fileExchangeConfig:
+    pollingStartDelay: 0s
+    pollingInterval: 1m
+    pollingRetryInterval: 30s

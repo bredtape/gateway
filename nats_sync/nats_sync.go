@@ -57,7 +57,7 @@ func (c NatsSyncConfig) Validate() error {
 		return errors.New("deployment empty")
 	}
 	if c.SyncStream == "" {
-		return errors.New("subscriptionStream empty")
+		return errors.New("syncStream empty")
 	}
 
 	if len(c.CommunicationSettings) == 0 {

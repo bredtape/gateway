@@ -18,8 +18,11 @@ import (
 )
 
 type FileExchangeConfig struct {
-	IncomingDir, OutgoingDir                                 string
-	PollingStartDelay, PollingInterval, PollingRetryInterval time.Duration
+	IncomingDir          string        `yaml:"incomingDir"`
+	OutgoingDir          string        `yaml:"outgoingDir"`
+	PollingStartDelay    time.Duration `yaml:"pollingStartDelay"`
+	PollingInterval      time.Duration `yaml:"pollingInterval"`
+	PollingRetryInterval time.Duration `yaml:"pollingRetryInterval"`
 }
 
 func (c FileExchangeConfig) Validate() error {
@@ -39,6 +42,24 @@ func (c FileExchangeConfig) Validate() error {
 		return errors.New("pollingRetryInterval must be at least 1 ms")
 	}
 	return nil
+}
+
+func (c *FileExchangeConfig) WithDefault(d FileExchangeConfig) {
+	if c.IncomingDir == "" {
+		c.IncomingDir = d.IncomingDir
+	}
+	if c.OutgoingDir == "" {
+		c.OutgoingDir = d.OutgoingDir
+	}
+	if c.PollingStartDelay == 0 {
+		c.PollingStartDelay = d.PollingStartDelay
+	}
+	if c.PollingInterval == 0 {
+		c.PollingInterval = d.PollingInterval
+	}
+	if c.PollingRetryInterval == 0 {
+		c.PollingRetryInterval = d.PollingRetryInterval
+	}
 }
 
 var (

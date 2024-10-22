@@ -11,4 +11,4 @@ COPY . .
 RUN go build nats_sync/cmd/main.go -o nats_sync
 
 ENTRYPOINT [ "/app/nats_sync" ]
-CMD [ "-h" ]
+CMD [ ]

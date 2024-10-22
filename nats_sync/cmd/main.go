@@ -4,6 +4,7 @@ import (
 	"flag"
 	"fmt"
 	"log/slog"
+	"net/http"
 	"os"
 	"strings"
 	"time"
@@ -13,23 +14,14 @@ import (
 	"github.com/bredtape/retry"
 	"github.com/bredtape/slogging"
 	"github.com/peterbourgon/ff/v3"
+	"github.com/pkg/errors"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"golang.org/x/net/context"
+	"gopkg.in/yaml.v3"
 )
 
 // app name, used for environment and metrics prefix
 const app = "nats_sync"
-
-var defaultCommSettings = nats_sync.CommunicationSettings{
-	AckTimeoutPrSubscription:                             5 * time.Second,
-	AckRetryPrSubscription:                               retry.Must(retry.NewExp(0.4, 10*time.Second, 60*time.Second)),
-	HeartbeatIntervalPrSubscription:                      time.Minute,
-	PendingAcksPrSubscriptionMax:                         100,
-	MaxAccumulatedPayloadSizeBytes:                       4 << 20, // 4 MB
-	PendingIncomingMessagesPrSubscriptionMaxBuffered:     1e3,
-	PendingIncomingMessagesPrSubscriptionDeleteThreshold: 400,
-	NatsOperationTimeout:                                 5 * time.Second,
-	BatchFlushTimeout:                                    time.Second,
-	ExchangeOperationTimeout:                             5 * time.Second}
 
 type Config struct {
 	NatsURLs string
@@ -43,15 +35,7 @@ type Config struct {
 	LogLevel slog.Level
 	LogJSON  bool
 
-	From, To gateway.Deployment
-	nats_sync.CommunicationSettings
-
-	FileExchangeEnabled bool
-	FileExchangeConfig  nats_sync.FileExchangeConfig
-}
-
-var defaultConfig = Config{
-	HTTPAddress: ":8300",
+	SyncConfigFile string
 }
 
 func readArgs() Config {
@@ -63,35 +47,11 @@ func readArgs() Config {
 		os.Exit(1)
 	}
 
-	cfg := defaultConfig
-	fs.StringVar(&cfg.NatsURLs, "nats-urls", cfg.NatsURLs, "Nats urls separated with ,. Required")
-	fs.StringVar(&cfg.NatsSeedFile, "nats-seed-file", cfg.NatsSeedFile, "Optional nats .nk seed file auth")
-	fs.StringVar(&cfg.HTTPAddress, "http-address", cfg.HTTPAddress, "HTTP address to serve metrics etc.")
-
-	fs.TextVar(&cfg.From, "from", gateway.Deployment(""), "From deployment. Required")
-	fs.TextVar(&cfg.To, "to", gateway.Deployment(""), "To deployment. Required")
-
-	// --communication settings--
-	fs.DurationVar(&cfg.AckTimeoutPrSubscription, "ack-timeout", defaultCommSettings.AckTimeoutPrSubscription, "Ack timeout per subscription")
-	var ackRetryStep, ackRetryMax time.Duration
-	fs.DurationVar(&ackRetryStep, "ack-retry-step", 10*time.Second, "Ack retry step size. Should be greater than ack-timeout")
-	fs.DurationVar(&ackRetryMax, "ack-retry-max", 60*time.Second, "Ack retry max duration. Should be much greater than ack-retry-step")
-	fs.DurationVar(&cfg.HeartbeatIntervalPrSubscription, "heartbeat-interval", defaultCommSettings.HeartbeatIntervalPrSubscription, "Heartbeat interval per subscription")
-	fs.IntVar(&cfg.PendingAcksPrSubscriptionMax, "pending-acks-max", defaultCommSettings.PendingAcksPrSubscriptionMax, "Max pending acks per subscription")
-	fs.IntVar(&cfg.PendingIncomingMessagesPrSubscriptionDeleteThreshold, "pending-incoming-messages-delete-threshold", defaultCommSettings.PendingIncomingMessagesPrSubscriptionDeleteThreshold, "Pending incoming messages delete threshold")
-	fs.IntVar(&cfg.PendingIncomingMessagesPrSubscriptionMaxBuffered, "pending-incoming-messages-max-buffered", defaultCommSettings.PendingIncomingMessagesPrSubscriptionMaxBuffered, "Max pending incoming messages buffered")
-	fs.IntVar(&cfg.MaxAccumulatedPayloadSizeBytes, "max-accumulated-payload-size", defaultCommSettings.MaxAccumulatedPayloadSizeBytes, "Max accumulated payload size in bytes")
-	fs.DurationVar(&cfg.NatsOperationTimeout, "nats-operation-timeout", defaultCommSettings.NatsOperationTimeout, "Nats operation timeout")
-	fs.DurationVar(&cfg.BatchFlushTimeout, "batch-flush-timeout", defaultCommSettings.BatchFlushTimeout, "Batch flush timeout")
-	fs.DurationVar(&cfg.ExchangeOperationTimeout, "exchange-operation-timeout", defaultCommSettings.ExchangeOperationTimeout, "Exchange operation timeout")
-
-	// --file exchange settings--
-	fs.BoolVar(&cfg.FileExchangeEnabled, "file-exchange-enabled", false, "Enable file exchange")
-	fs.StringVar(&cfg.FileExchangeConfig.IncomingDir, "file-incoming-dir", "", "File exchange incoming directory")
-	fs.StringVar(&cfg.FileExchangeConfig.OutgoingDir, "file-outgoing-dir", "", "File exchange outgoing directory")
-	fs.DurationVar(&cfg.FileExchangeConfig.PollingStartDelay, "file-polling-start-delay", 0, "File exchange polling start delay")
-	fs.DurationVar(&cfg.FileExchangeConfig.PollingInterval, "file-polling-interval", 60*time.Second, "File exchange polling interval. Incoming directory will have file watch, so changes are picked up immediately")
-	fs.DurationVar(&cfg.FileExchangeConfig.PollingRetryInterval, "file-polling-retry-interval", 30*time.Second, "File exchange polling retry interval")
+	var cfg Config
+	fs.StringVar(&cfg.NatsURLs, "nats-urls", "", "Nats urls separated with ,. Required")
+	fs.StringVar(&cfg.NatsSeedFile, "nats-seed-file", "", "Optional nats .nk seed file auth")
+	fs.StringVar(&cfg.HTTPAddress, "http-address", ":8900", "HTTP address to serve metrics etc.")
+	fs.StringVar(&cfg.SyncConfigFile, "config-file", "config.yml", "Config file in YAML format")
 
 	var logLevel slog.Level
 	fs.TextVar(&logLevel, "log-level", slog.LevelDebug, "Log level")
@@ -111,6 +71,14 @@ func readArgs() Config {
 		os.Exit(0)
 	}
 
+	if cfg.NatsURLs == "" {
+		bail(fs, "'nats-urls' not specified")
+	}
+
+	if fileNotExists(cfg.SyncConfigFile) {
+		bail(fs, "'config-file' does not exist")
+	}
+
 	slogging.SetDefaults(slog.HandlerOptions{Level: logLevel}, logJSON)
 	slogging.LogBuildInfo()
 
@@ -122,9 +90,178 @@ func main() {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
+	log := slog.With("module", "nats_sync/cmd")
+
+	syncConf, err := loadNatsSyncConfigFromFile(cfg.SyncConfigFile)
+	if err != nil {
+		slogging.Fatal(log, "failed to load/parse/validate sync config", "err", err)
+	}
+
+	jsConf := nats_sync.JSConfig{URLs: cfg.NatsURLs}
+	if cfg.NatsSeedFile != "" {
+		err = jsConf.WithSeedFile(cfg.NatsSeedFile)
+		if err != nil {
+			slogging.Fatal(log, "failed to set seed file", "err", err)
+		}
+	}
+	js := nats_sync.NewJSConn(jsConf)
+	err = nats_sync.StartNatsSync(ctx, js, syncConf)
+	if err != nil {
+		slogging.Fatal(log, "failed to start nats sync", "err", err)
+	}
+
+	mux := http.NewServeMux()
+	mux.Handle("/metrics", promhttp.Handler())
+	log.Info("starting http server", "address", cfg.HTTPAddress)
+	err = http.ListenAndServe(cfg.HTTPAddress, mux)
+	if err != nil {
+		slogging.Fatal(log, "failed to start http server", "err", err)
+	}
+}
+
+func loadNatsSyncConfigFromFile(filename string) (nats_sync.NatsSyncConfig, error) {
+	f, err := os.Open(filename)
+	if err != nil {
+		return nats_sync.NatsSyncConfig{}, errors.Wrap(err, "failed to open config file")
+	}
+	defer f.Close()
+	var cfg NatsSyncConfigSerialize
+	err = yaml.NewDecoder(f).Decode(&cfg)
+	if err != nil {
+		return nats_sync.NatsSyncConfig{}, errors.Wrap(err, "failed to load config from file")
+	}
+
+	yaml.NewEncoder(os.Stdout).Encode(cfg)
+
+	return cfg.ToNatsSyncConfig()
 }
 
 func bail(fs *flag.FlagSet, format string, args ...interface{}) {
 	fmt.Fprintf(os.Stderr, format+"\n", args...)
 	fs.Usage()
+}
+
+type NatsSyncConfigSerialize struct {
+	Deployment         gateway.Deployment                       `yaml:"deployment"`
+	SyncStream         string                                   `yaml:"syncStream"`
+	DefaultSettings    DeploymentSetting                        `yaml:"defaultSettings"`
+	DeploymentSettings map[gateway.Deployment]DeploymentSetting `yaml:"deploymentSettings"`
+}
+
+// convert to NatsSyncConfig and validate
+func (c NatsSyncConfigSerialize) ToNatsSyncConfig() (nats_sync.NatsSyncConfig, error) {
+	result := nats_sync.NatsSyncConfig{
+		Deployment:            c.Deployment,
+		SyncStream:            c.SyncStream,
+		CommunicationSettings: make(map[gateway.Deployment]nats_sync.CommunicationSettings),
+		Exchanges:             make(map[gateway.Deployment]nats_sync.Exchange)}
+
+	for d, v := range c.DeploymentSettings {
+		v.WithDefault(c.DefaultSettings)
+		cs, err := v.ToCommunicationSettings()
+		if err != nil {
+			return result, errors.Wrapf(err, "failed to convert DeploymentSetting for %s", d)
+		}
+		result.CommunicationSettings[d] = cs
+
+		if v.FileExchangeEnabled {
+			ex, err := nats_sync.NewFileExchange(v.FileExchangeConfig)
+			if err != nil {
+				return result, err
+			}
+			result.Exchanges[d] = ex
+		}
+	}
+
+	if ve := result.Validate(); ve != nil {
+		return result, ve
+	}
+	return result, nil
+}
+
+type DeploymentSetting struct {
+	AckTimeoutPrSubscription                             time.Duration                `yaml:"ackTimeout"`
+	AckRetryPrSubscriptionJitter                         float64                      `yaml:"ackRetryJitter"`
+	AckRetryPrSubscriptionStep                           time.Duration                `yaml:"ackRetryStep"`
+	AckRetryPrSubscriptionMax                            time.Duration                `yaml:"ackRetryMax"`
+	HeartbeatIntervalPrSubscription                      time.Duration                `yaml:"heartbeatInterval"`
+	PendingAcksPrSubscriptionMax                         int                          `yaml:"pendingAcksMax"`
+	PendingIncomingMessagesPrSubscriptionMaxBuffered     int                          `yaml:"pendingIncomingMessagesMaxBuffered"`
+	PendingIncomingMessagesPrSubscriptionDeleteThreshold int                          `yaml:"pendingIncomingMessagesDeleteThreshold"`
+	MaxAccumulatedPayloadSizeBytes                       int                          `yaml:"maxAccumulatedPayloadSize"`
+	NatsOperationTimeout                                 time.Duration                `yaml:"natsOperationTimeout"`
+	BatchFlushTimeout                                    time.Duration                `yaml:"batchFlushTimeout"`
+	ExchangeOperationTimeout                             time.Duration                `yaml:"exchangeOperationTimeout"`
+	FileExchangeEnabled                                  bool                         `yaml:"fileExchangeEnabled"`
+	FileExchangeConfig                                   nats_sync.FileExchangeConfig `yaml:"fileExchangeConfig"`
+}
+
+func (d DeploymentSetting) ToCommunicationSettings() (nats_sync.CommunicationSettings, error) {
+	ackRetry, err := retry.NewExp(d.AckRetryPrSubscriptionJitter, d.AckRetryPrSubscriptionStep, d.AckRetryPrSubscriptionMax)
+	if err != nil {
+		return nats_sync.CommunicationSettings{}, errors.Wrap(err, "failed to create AckRetryPrSubscription")
+	}
+	result := nats_sync.CommunicationSettings{
+		AckTimeoutPrSubscription:                             d.AckTimeoutPrSubscription,
+		AckRetryPrSubscription:                               ackRetry,
+		HeartbeatIntervalPrSubscription:                      d.HeartbeatIntervalPrSubscription,
+		PendingAcksPrSubscriptionMax:                         d.PendingAcksPrSubscriptionMax,
+		PendingIncomingMessagesPrSubscriptionMaxBuffered:     d.PendingIncomingMessagesPrSubscriptionMaxBuffered,
+		PendingIncomingMessagesPrSubscriptionDeleteThreshold: d.PendingIncomingMessagesPrSubscriptionDeleteThreshold,
+		MaxAccumulatedPayloadSizeBytes:                       d.MaxAccumulatedPayloadSizeBytes,
+		NatsOperationTimeout:                                 d.NatsOperationTimeout,
+		BatchFlushTimeout:                                    d.BatchFlushTimeout,
+		ExchangeOperationTimeout:                             d.ExchangeOperationTimeout,
+	}
+
+	return result, nil
+}
+
+// apply default settings when unspecified/default value
+func (d *DeploymentSetting) WithDefault(def DeploymentSetting) {
+	if d.AckTimeoutPrSubscription == 0 {
+		d.AckTimeoutPrSubscription = def.AckTimeoutPrSubscription
+	}
+	if d.AckRetryPrSubscriptionJitter == 0 {
+		d.AckRetryPrSubscriptionJitter = def.AckRetryPrSubscriptionJitter
+	}
+	if d.AckRetryPrSubscriptionStep == 0 {
+		d.AckRetryPrSubscriptionStep = def.AckRetryPrSubscriptionStep
+	}
+	if d.AckRetryPrSubscriptionMax == 0 {
+		d.AckRetryPrSubscriptionMax = def.AckRetryPrSubscriptionMax
+	}
+	if d.HeartbeatIntervalPrSubscription == 0 {
+		d.HeartbeatIntervalPrSubscription = def.HeartbeatIntervalPrSubscription
+	}
+	if d.PendingAcksPrSubscriptionMax == 0 {
+		d.PendingAcksPrSubscriptionMax = def.PendingAcksPrSubscriptionMax
+	}
+	if d.PendingIncomingMessagesPrSubscriptionMaxBuffered == 0 {
+		d.PendingIncomingMessagesPrSubscriptionMaxBuffered = def.PendingIncomingMessagesPrSubscriptionMaxBuffered
+	}
+	if d.PendingIncomingMessagesPrSubscriptionDeleteThreshold == 0 {
+		d.PendingIncomingMessagesPrSubscriptionDeleteThreshold = def.PendingIncomingMessagesPrSubscriptionDeleteThreshold
+	}
+	if d.MaxAccumulatedPayloadSizeBytes == 0 {
+		d.MaxAccumulatedPayloadSizeBytes = def.MaxAccumulatedPayloadSizeBytes
+	}
+	if d.NatsOperationTimeout == 0 {
+		d.NatsOperationTimeout = def.NatsOperationTimeout
+	}
+	if d.BatchFlushTimeout == 0 {
+		d.BatchFlushTimeout = def.BatchFlushTimeout
+	}
+	if d.ExchangeOperationTimeout == 0 {
+		d.ExchangeOperationTimeout = def.ExchangeOperationTimeout
+	}
+	if !d.FileExchangeEnabled {
+		d.FileExchangeEnabled = def.FileExchangeEnabled
+	}
+	d.FileExchangeConfig.WithDefault(def.FileExchangeConfig)
+}
+
+func fileNotExists(filename string) bool {
+	_, err := os.Stat(filename)
+	return os.IsNotExist(err)
 }

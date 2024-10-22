@@ -5,25 +5,29 @@ volumes:
   file-outA:
   file-inA:
 
+networks:
+  netA:
+  netB:
+
 services:
-  syncA:
+  sync_a:
     build:
       context: ../..
       dockerfile: Dockerfile
     environment:
       NATS_SYNC_LOG_LEVEL: debug-3
-      NATS_SYNC_FROM: a
-      NATS_SYNC_TO: b
-      NATS_URL: nats://natsA:4222
-      NATS_SUBJECT: sync
-      NATS_SYNC_FILE_EXCHANGE_ENABLED: true
-      NATS_SYNC_FILE_IN_DIR: /data/in
-      NATS_SYNC_FILE_OUT_DIR: /data/out
+      NATS_SYNC_NATS_URL: nats://nats_a:4222
+      NATS_SYNC_CONFIG: ./configA.yml
     volumes:
+      - "./:/config/:ro"
       - file-inA:/data/in
       - file-outA:/data/out
+    networks:
+      - netA
+    ports:
+      - 8900:8900
 
-  natsA:
+  nats_a:
     image: ${NATS_IMAGE}
     command:
       --debug
@@ -34,26 +38,28 @@ services:
       - nats-dataA:/data
     ports:
       - "4222:4222"
+    networks:
+      - netA
 
-  syncB:
+  sync_b:
     build:
       context: ../..
       dockerfile: Dockerfile
     environment:
       NATS_SYNC_LOG_LEVEL: debug-3
-      NATS_SYNC_FROM: b
-      NATS_SYNC_TO: a
-      NATS_URL: nats://natsB:4222
-      NATS_SUBJECT: sync
-      NATS_SYNC_FILE_EXCHANGE_ENABLED: true
-      NATS_SYNC_FILE_IN_DIR: /data/in
-      NATS_SYNC_FILE_OUT_DIR: /data/out
+      NATS_URL: nats://nats_b:4222
+      NATS_SYNC_CONFIG: ./configB.yml
     volumes:
+      - "./:/config/:ro"
       - file-inA:/data/out # reverse direction
       - file-outA:/data/in # reverse direction
+    networks:
+      - netB
+    ports:
+      - 8901:8900
 
 
-  natsB:
+  nats_b:
     image: ${NATS_IMAGE}
     command:
       --debug
@@ -64,4 +70,6 @@ services:
       - nats-dataB:/data
     ports:
       - "4322:4222" # non-standard port
+    networks:
+      - netB
 
