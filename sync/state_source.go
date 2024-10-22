@@ -1,4 +1,4 @@
-package nats_sync
+package sync
 
 import (
 	"cmp"
@@ -6,7 +6,7 @@ import (
 	"time"
 
 	"github.com/bredtape/gateway"
-	v1 "github.com/bredtape/gateway/nats_sync/v1"
+	v1 "github.com/bredtape/gateway/sync/v1"
 	"github.com/nats-io/nats.go/jetstream"
 	"github.com/pkg/errors"
 	"google.golang.org/protobuf/types/known/timestamppb"

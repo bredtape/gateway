@@ -1,4 +1,4 @@
-package nats_sync
+package sync
 
 import (
 	"context"
@@ -7,8 +7,8 @@ import (
 	"time"
 
 	"github.com/bredtape/gateway"
-	v1 "github.com/bredtape/gateway/nats_sync/v1"
 	rh "github.com/bredtape/gateway/remote_http/v1"
+	v1 "github.com/bredtape/gateway/sync/v1"
 	"github.com/bredtape/retry"
 	"github.com/google/uuid"
 	"github.com/nats-io/nats.go/jetstream"

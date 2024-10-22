@@ -1,10 +1,10 @@
-package nats_sync
+package sync
 
 import (
 	"context"
 	"time"
 
-	v1 "github.com/bredtape/gateway/nats_sync/v1"
+	v1 "github.com/bredtape/gateway/sync/v1"
 	"github.com/pkg/errors"
 )
 

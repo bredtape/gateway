@@ -1,4 +1,4 @@
-package nats_sync
+package sync
 
 import (
 	"context"
@@ -10,7 +10,7 @@ import (
 	"regexp"
 	"time"
 
-	v1 "github.com/bredtape/gateway/nats_sync/v1"
+	v1 "github.com/bredtape/gateway/sync/v1"
 	"github.com/cespare/xxhash"
 	"github.com/fsnotify/fsnotify"
 	"github.com/pkg/errors"
@@ -78,9 +78,6 @@ type FileExchange struct {
 	// monotonic increasing counter used when writing files. Wraps after 9 digits (base 10).
 	// points to the last number used (so increment before use)
 	counter uint32
-
-	// to get current time
-	now func() time.Time
 
 	// polling options
 	startDelay, interval, retry time.Duration
@@ -314,11 +311,8 @@ func (ex *FileExchange) assertAllDirExists() error {
 func assertDirExists(d string) error {
 	fi, err := os.Stat(d)
 	if err != nil {
-		var pe *os.PathError
-		if errors.As(err, &pe) {
-			if errors.Is(pe.Err, fs.ErrNotExist) {
-				return errors.Wrapf(ErrDirectoryDoesNotExists, "directory '%s' does not exists", d)
-			}
+		if os.IsNotExist(err) {
+			return errors.Wrapf(ErrDirectoryDoesNotExists, "directory '%s' does not exists", d)
 		}
 		return errors.Wrapf(err, "could not determine file info for '%s'", d)
 	}

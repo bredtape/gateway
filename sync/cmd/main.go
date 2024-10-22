@@ -10,7 +10,7 @@ import (
 	"time"
 
 	"github.com/bredtape/gateway"
-	"github.com/bredtape/gateway/nats_sync"
+	"github.com/bredtape/gateway/sync"
 	"github.com/bredtape/retry"
 	"github.com/bredtape/slogging"
 	"github.com/peterbourgon/ff/v3"
@@ -21,7 +21,7 @@ import (
 )
 
 // app name, used for environment and metrics prefix
-const app = "nats_sync"
+const app = "sync"
 
 type Config struct {
 	NatsURLs string
@@ -90,22 +90,22 @@ func main() {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	log := slog.With("module", "nats_sync/cmd")
+	log := slog.With("module", "sync/cmd")
 
 	syncConf, err := loadNatsSyncConfigFromFile(cfg.SyncConfigFile)
 	if err != nil {
 		slogging.Fatal(log, "failed to load/parse/validate sync config", "err", err)
 	}
 
-	jsConf := nats_sync.JSConfig{URLs: cfg.NatsURLs}
+	jsConf := sync.JSConfig{URLs: cfg.NatsURLs}
 	if cfg.NatsSeedFile != "" {
 		err = jsConf.WithSeedFile(cfg.NatsSeedFile)
 		if err != nil {
 			slogging.Fatal(log, "failed to set seed file", "err", err)
 		}
 	}
-	js := nats_sync.NewJSConn(jsConf)
-	err = nats_sync.StartNatsSync(ctx, js, syncConf)
+	js := sync.NewJSConn(jsConf)
+	err = sync.StartNatsSync(ctx, js, syncConf)
 	if err != nil {
 		slogging.Fatal(log, "failed to start nats sync", "err", err)
 	}
@@ -119,16 +119,16 @@ func main() {
 	}
 }
 
-func loadNatsSyncConfigFromFile(filename string) (nats_sync.NatsSyncConfig, error) {
+func loadNatsSyncConfigFromFile(filename string) (sync.NatsSyncConfig, error) {
 	f, err := os.Open(filename)
 	if err != nil {
-		return nats_sync.NatsSyncConfig{}, errors.Wrap(err, "failed to open config file")
+		return sync.NatsSyncConfig{}, errors.Wrap(err, "failed to open config file")
 	}
 	defer f.Close()
 	var cfg NatsSyncConfigSerialize
 	err = yaml.NewDecoder(f).Decode(&cfg)
 	if err != nil {
-		return nats_sync.NatsSyncConfig{}, errors.Wrap(err, "failed to load config from file")
+		return sync.NatsSyncConfig{}, errors.Wrap(err, "failed to load config from file")
 	}
 
 	yaml.NewEncoder(os.Stdout).Encode(cfg)
@@ -149,12 +149,12 @@ type NatsSyncConfigSerialize struct {
 }
 
 // convert to NatsSyncConfig and validate
-func (c NatsSyncConfigSerialize) ToNatsSyncConfig() (nats_sync.NatsSyncConfig, error) {
-	result := nats_sync.NatsSyncConfig{
+func (c NatsSyncConfigSerialize) ToNatsSyncConfig() (sync.NatsSyncConfig, error) {
+	result := sync.NatsSyncConfig{
 		Deployment:            c.Deployment,
 		SyncStream:            c.SyncStream,
-		CommunicationSettings: make(map[gateway.Deployment]nats_sync.CommunicationSettings),
-		Exchanges:             make(map[gateway.Deployment]nats_sync.Exchange)}
+		CommunicationSettings: make(map[gateway.Deployment]sync.CommunicationSettings),
+		Exchanges:             make(map[gateway.Deployment]sync.Exchange)}
 
 	for d, v := range c.DeploymentSettings {
 		v.WithDefault(c.DefaultSettings)
@@ -165,7 +165,7 @@ func (c NatsSyncConfigSerialize) ToNatsSyncConfig() (nats_sync.NatsSyncConfig, e
 		result.CommunicationSettings[d] = cs
 
 		if v.FileExchangeEnabled {
-			ex, err := nats_sync.NewFileExchange(v.FileExchangeConfig)
+			ex, err := sync.NewFileExchange(v.FileExchangeConfig)
 			if err != nil {
 				return result, err
 			}
@@ -180,28 +180,28 @@ func (c NatsSyncConfigSerialize) ToNatsSyncConfig() (nats_sync.NatsSyncConfig, e
 }
 
 type DeploymentSetting struct {
-	AckTimeoutPrSubscription                             time.Duration                `yaml:"ackTimeout"`
-	AckRetryPrSubscriptionJitter                         float64                      `yaml:"ackRetryJitter"`
-	AckRetryPrSubscriptionStep                           time.Duration                `yaml:"ackRetryStep"`
-	AckRetryPrSubscriptionMax                            time.Duration                `yaml:"ackRetryMax"`
-	HeartbeatIntervalPrSubscription                      time.Duration                `yaml:"heartbeatInterval"`
-	PendingAcksPrSubscriptionMax                         int                          `yaml:"pendingAcksMax"`
-	PendingIncomingMessagesPrSubscriptionMaxBuffered     int                          `yaml:"pendingIncomingMessagesMaxBuffered"`
-	PendingIncomingMessagesPrSubscriptionDeleteThreshold int                          `yaml:"pendingIncomingMessagesDeleteThreshold"`
-	MaxAccumulatedPayloadSizeBytes                       int                          `yaml:"maxAccumulatedPayloadSize"`
-	NatsOperationTimeout                                 time.Duration                `yaml:"natsOperationTimeout"`
-	BatchFlushTimeout                                    time.Duration                `yaml:"batchFlushTimeout"`
-	ExchangeOperationTimeout                             time.Duration                `yaml:"exchangeOperationTimeout"`
-	FileExchangeEnabled                                  bool                         `yaml:"fileExchangeEnabled"`
-	FileExchangeConfig                                   nats_sync.FileExchangeConfig `yaml:"fileExchangeConfig"`
+	AckTimeoutPrSubscription                             time.Duration           `yaml:"ackTimeout"`
+	AckRetryPrSubscriptionJitter                         float64                 `yaml:"ackRetryJitter"`
+	AckRetryPrSubscriptionStep                           time.Duration           `yaml:"ackRetryStep"`
+	AckRetryPrSubscriptionMax                            time.Duration           `yaml:"ackRetryMax"`
+	HeartbeatIntervalPrSubscription                      time.Duration           `yaml:"heartbeatInterval"`
+	PendingAcksPrSubscriptionMax                         int                     `yaml:"pendingAcksMax"`
+	PendingIncomingMessagesPrSubscriptionMaxBuffered     int                     `yaml:"pendingIncomingMessagesMaxBuffered"`
+	PendingIncomingMessagesPrSubscriptionDeleteThreshold int                     `yaml:"pendingIncomingMessagesDeleteThreshold"`
+	MaxAccumulatedPayloadSizeBytes                       int                     `yaml:"maxAccumulatedPayloadSize"`
+	NatsOperationTimeout                                 time.Duration           `yaml:"natsOperationTimeout"`
+	BatchFlushTimeout                                    time.Duration           `yaml:"batchFlushTimeout"`
+	ExchangeOperationTimeout                             time.Duration           `yaml:"exchangeOperationTimeout"`
+	FileExchangeEnabled                                  bool                    `yaml:"fileExchangeEnabled"`
+	FileExchangeConfig                                   sync.FileExchangeConfig `yaml:"fileExchangeConfig"`
 }
 
-func (d DeploymentSetting) ToCommunicationSettings() (nats_sync.CommunicationSettings, error) {
+func (d DeploymentSetting) ToCommunicationSettings() (sync.CommunicationSettings, error) {
 	ackRetry, err := retry.NewExp(d.AckRetryPrSubscriptionJitter, d.AckRetryPrSubscriptionStep, d.AckRetryPrSubscriptionMax)
 	if err != nil {
-		return nats_sync.CommunicationSettings{}, errors.Wrap(err, "failed to create AckRetryPrSubscription")
+		return sync.CommunicationSettings{}, errors.Wrap(err, "failed to create AckRetryPrSubscription")
 	}
-	result := nats_sync.CommunicationSettings{
+	result := sync.CommunicationSettings{
 		AckTimeoutPrSubscription:                             d.AckTimeoutPrSubscription,
 		AckRetryPrSubscription:                               ackRetry,
 		HeartbeatIntervalPrSubscription:                      d.HeartbeatIntervalPrSubscription,

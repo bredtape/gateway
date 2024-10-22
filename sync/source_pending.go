@@ -1,10 +1,10 @@
-package nats_sync
+package sync
 
 import (
 	"slices"
 	"time"
 
-	v1 "github.com/bredtape/gateway/nats_sync/v1"
+	v1 "github.com/bredtape/gateway/sync/v1"
 	"github.com/bredtape/retry"
 	"github.com/pkg/errors"
 )
@@ -166,14 +166,6 @@ func cmpPendingAckSequence(a, b SourcePendingAck) int {
 		return 1
 	}
 	return 0
-}
-
-func (w SourcePendingWindow) getPendingRanges() []RangeInclusive[SourceSequence] {
-	ranges := make([]RangeInclusive[SourceSequence], 0, len(w.Pending))
-	for _, p := range w.Pending {
-		ranges = append(ranges, p.SequenceRange)
-	}
-	return ranges
 }
 
 func (w SourcePendingWindow) getConsecutivePendingStartingFrom(from SourceSequence) (map[SetID]SourcePendingAck, SourceSequence) {

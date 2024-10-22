@@ -15,9 +15,9 @@ services:
       context: ../..
       dockerfile: Dockerfile
     environment:
-      NATS_SYNC_LOG_LEVEL: debug-3
-      NATS_SYNC_NATS_URL: nats://nats_a:4222
-      NATS_SYNC_CONFIG: ./configA.yml
+      SYNC_LOG_LEVEL: debug-3
+      SYNC_NATS_URLS: nats://nats_a:4222
+      SYNC_CONFIG: ./configA.yml
     volumes:
       - "./:/config/:ro"
       - file-inA:/data/in
@@ -46,9 +46,9 @@ services:
       context: ../..
       dockerfile: Dockerfile
     environment:
-      NATS_SYNC_LOG_LEVEL: debug-3
-      NATS_URL: nats://nats_b:4222
-      NATS_SYNC_CONFIG: ./configB.yml
+      SYNC_LOG_LEVEL: debug-3
+      SYNC_NATS_URLS: nats://nats_b:4222
+      SYNC_CONFIG: ./configB.yml
     volumes:
       - "./:/config/:ro"
       - file-inA:/data/out # reverse direction

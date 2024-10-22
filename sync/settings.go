@@ -1,4 +1,4 @@
-package nats_sync
+package sync
 
 import (
 	"time"

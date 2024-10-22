@@ -1,4 +1,4 @@
-package nats_sync
+package sync
 
 import (
 	"context"
@@ -10,7 +10,7 @@ import (
 	"time"
 
 	"github.com/bredtape/gateway"
-	v1 "github.com/bredtape/gateway/nats_sync/v1"
+	v1 "github.com/bredtape/gateway/sync/v1"
 	"github.com/bredtape/retry"
 	"github.com/bredtape/set"
 	"github.com/nats-io/nats.go/jetstream"
@@ -29,8 +29,6 @@ const (
 var (
 	startSyncRequestName = string((&v1.StartSyncRequest{}).ProtoReflect().Descriptor().FullName())
 	stopSyncRequestName  = string((&v1.StopSyncRequest{}).ProtoReflect().Descriptor().FullName())
-
-	retryOp = retry.Must(retry.NewExp(0.2, time.Second, 10*time.Second))
 )
 
 type NatsSyncConfig struct {

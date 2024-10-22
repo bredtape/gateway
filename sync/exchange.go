@@ -1,9 +1,9 @@
-package nats_sync
+package sync
 
 import (
 	"context"
 
-	v1 "github.com/bredtape/gateway/nats_sync/v1"
+	v1 "github.com/bredtape/gateway/sync/v1"
 )
 
 type Exchange interface {

@@ -4,7 +4,7 @@ package com.github.bredtape.gateway.nats_sync.v1;
 
 import "google/protobuf/timestamp.proto";
 
-option go_package = "github.com/bredtape/gateway/nats_sync/v1";
+option go_package = "github.com/bredtape/gateway/sync/v1";
 
 
 // nats sync service, to initiate sync of a stream from one deployment to another.
