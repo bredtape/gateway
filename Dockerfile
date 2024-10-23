@@ -8,7 +8,7 @@ RUN go mod download
 
 COPY . .
 
-RUN go build nats_sync/cmd/main.go
+RUN go build sync/cmd/main.go
 
 ENTRYPOINT [ "/app/main" ]
 CMD [ ]

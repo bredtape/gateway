@@ -152,10 +152,7 @@ func (s *state) RegisterStartSync(req *v1.StartSyncRequest) error {
 	isSink := to == s.from
 
 	if isSource {
-		sub := toSourceSubscription(
-			to,
-			req.GetSourceStreamName(),
-			req.GetConsumerConfig(), req.GetFilterSubjects())
+		sub := toSourceSubscription(req.GetSourceStreamName(), req.GetConsumerConfig(), req.GetFilterSubjects())
 
 		if _, exists := s.sourceOriginalSubscription[sub.SourceSubscriptionKey]; exists {
 			return errors.New("subscription already exists")
@@ -168,7 +165,7 @@ func (s *state) RegisterStartSync(req *v1.StartSyncRequest) error {
 		if w, exists := s.sourceAckWindows[sub.SourceSubscriptionKey]; exists {
 			if w.Extrema.From > 0 {
 				sub.DeliverPolicy = jetstream.DeliverByStartSequencePolicy
-				sub.OptStartSeq = uint64(w.Extrema.From)
+				sub.OptStartSeq = w.Extrema.From
 			}
 		}
 		return nil

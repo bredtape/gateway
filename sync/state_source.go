@@ -5,7 +5,6 @@ import (
 	"slices"
 	"time"
 
-	"github.com/bredtape/gateway"
 	v1 "github.com/bredtape/gateway/sync/v1"
 	"github.com/nats-io/nats.go/jetstream"
 	"github.com/pkg/errors"
@@ -33,7 +32,7 @@ func (s *state) GetSourceLocalSubscriptions(key SourceSubscriptionKey) (SourceSu
 		return SourceSubscription{
 			SourceSubscriptionKey: key,
 			DeliverPolicy:         jetstream.DeliverByStartSequencePolicy,
-			OptStartSeq:           uint64(w.Extrema.To),
+			OptStartSeq:           w.Extrema.To,
 			FilterSubjects:        sub.FilterSubjects}, true
 	}
 
@@ -136,7 +135,9 @@ func (s *state) SourceDeliverFromLocal(key SourceSubscriptionKey, lastSequence S
 		w.Extrema.From = 0
 	}
 
-	w.Extrema.To = SourceSequence(messages[acceptCount-1].GetSequence())
+	if acceptCount > 0 {
+		w.Extrema.To = SourceSequence(messages[acceptCount-1].GetSequence())
+	}
 
 	// prune existing messages if subscription was restarted
 	if s.sourceOutgoing == nil || lastSequence == 0 {
@@ -271,7 +272,7 @@ type SourceSubscription struct {
 	SourceSubscriptionKey
 
 	DeliverPolicy  jetstream.DeliverPolicy
-	OptStartSeq    uint64
+	OptStartSeq    SourceSequence
 	OptStartTime   time.Time
 	FilterSubjects []string
 }
@@ -285,11 +286,11 @@ func (s SourceSubscription) Clone() SourceSubscription {
 		FilterSubjects:        slices.Clone(s.FilterSubjects)}
 }
 
-func toSourceSubscription(sinkDeployment gateway.Deployment, sourceStream string, s *v1.ConsumerConfig, filterSubjects []string) SourceSubscription {
+func toSourceSubscription(sourceStream string, s *v1.ConsumerConfig, filterSubjects []string) SourceSubscription {
 	sub := SourceSubscription{
 		SourceSubscriptionKey: SourceSubscriptionKey{SourceStreamName: sourceStream},
 		DeliverPolicy:         ToDeliverPolicy(s.GetDeliverPolicy()),
-		OptStartSeq:           s.GetOptStartSeq(),
+		OptStartSeq:           SourceSequence(s.GetOptStartSeq()),
 		FilterSubjects:        filterSubjects}
 	slices.Sort(sub.FilterSubjects)
 
@@ -302,7 +303,7 @@ func toSourceSubscription(sinkDeployment gateway.Deployment, sourceStream string
 func fromSourceSubscription(sub SourceSubscription) *v1.ConsumerConfig {
 	c := &v1.ConsumerConfig{
 		DeliverPolicy: FromDeliverPolicy(sub.DeliverPolicy),
-		OptStartSeq:   sub.OptStartSeq}
+		OptStartSeq:   uint64(sub.OptStartSeq)}
 	if sub.DeliverPolicy == jetstream.DeliverByStartTimePolicy {
 		c.OptStartTime = timestamppb.New(sub.OptStartTime.UTC())
 	}

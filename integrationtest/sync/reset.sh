@@ -3,4 +3,4 @@
 set -e
 
 docker compose down --volumes
-exec docker compose up --remove-orphans --build
+exec docker compose up --remove-orphans --build --abort-on-container-exit

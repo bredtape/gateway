@@ -1,4 +1,3 @@
-
 volumes:
   nats-dataA:
   nats-dataB:
@@ -17,7 +16,7 @@ services:
     environment:
       SYNC_LOG_LEVEL: debug-3
       SYNC_NATS_URLS: nats://nats_a:4222
-      SYNC_CONFIG: ./configA.yml
+      SYNC_CONFIG_FILE: /config/configA.yml
     volumes:
       - "./:/config/:ro"
       - file-inA:/data/in
@@ -29,8 +28,7 @@ services:
 
   nats_a:
     image: ${NATS_IMAGE}
-    command:
-      --debug
+    command: --debug
       --name natsA
       --jetstream
       --store_dir /data
@@ -48,7 +46,7 @@ services:
     environment:
       SYNC_LOG_LEVEL: debug-3
       SYNC_NATS_URLS: nats://nats_b:4222
-      SYNC_CONFIG: ./configB.yml
+      SYNC_CONFIG_FILE: /config/configB.yml
     volumes:
       - "./:/config/:ro"
       - file-inA:/data/out # reverse direction
@@ -58,11 +56,9 @@ services:
     ports:
       - 8901:8900
 
-
   nats_b:
     image: ${NATS_IMAGE}
-    command:
-      --debug
+    command: --debug
       --name natsB
       --jetstream
       --store_dir /data
@@ -72,4 +68,3 @@ services:
       - "4322:4222" # non-standard port
     networks:
       - netB
-

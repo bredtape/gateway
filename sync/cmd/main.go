@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"net/http/pprof"
 	"os"
 	"strings"
 	"time"
@@ -54,7 +55,7 @@ func readArgs() Config {
 	fs.StringVar(&cfg.SyncConfigFile, "config-file", "config.yml", "Config file in YAML format")
 
 	var logLevel slog.Level
-	fs.TextVar(&logLevel, "log-level", slog.LevelDebug, "Log level")
+	fs.TextVar(&logLevel, "log-level", slog.LevelDebug-3, "Log level")
 	var logJSON bool
 	fs.BoolVar(&logJSON, "log-json", false, "Log in JSON format")
 	var help bool
@@ -76,7 +77,7 @@ func readArgs() Config {
 	}
 
 	if fileNotExists(cfg.SyncConfigFile) {
-		bail(fs, "'config-file' does not exist")
+		bail(fs, "'config-file' does not exist (%s)", cfg.SyncConfigFile)
 	}
 
 	slogging.SetDefaults(slog.HandlerOptions{Level: logLevel}, logJSON)
@@ -112,6 +113,13 @@ func main() {
 
 	mux := http.NewServeMux()
 	mux.Handle("/metrics", promhttp.Handler())
+	mux.HandleFunc("/debug/pprof/", pprof.Index)
+	mux.HandleFunc("/debug/pprof/heap", pprof.Index)
+	mux.HandleFunc("/debug/pprof/cmdline", pprof.Cmdline)
+	mux.HandleFunc("/debug/pprof/profile", pprof.Profile)
+	mux.HandleFunc("/debug/pprof/symbol", pprof.Symbol)
+	mux.HandleFunc("/debug/pprof/trace", pprof.Trace)
+
 	log.Info("starting http server", "address", cfg.HTTPAddress)
 	err = http.ListenAndServe(cfg.HTTPAddress, mux)
 	if err != nil {
@@ -130,8 +138,6 @@ func loadNatsSyncConfigFromFile(filename string) (sync.NatsSyncConfig, error) {
 	if err != nil {
 		return sync.NatsSyncConfig{}, errors.Wrap(err, "failed to load config from file")
 	}
-
-	yaml.NewEncoder(os.Stdout).Encode(cfg)
 
 	return cfg.ToNatsSyncConfig()
 }

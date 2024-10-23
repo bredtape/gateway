@@ -229,12 +229,14 @@ func (c *JSConn) SubscribeOrderered(ctx context.Context, stream string, cfg jets
 
 	js, err := c.Connect(innerCtx)
 	if err != nil {
+		cancel()
 		return nil, errors.Wrap(err, "failed to connect to nats")
 	}
 
 	consumer, err := js.OrderedConsumer(innerCtx, stream, cfg)
 	if err != nil {
-		return nil, errors.Wrap(err, "failed to create ordered consumer")
+		cancel()
+		return nil, errors.Wrapf(err, "failed to create ordered consumer for stream '%s'", stream)
 	}
 
 	ch := make(chan WithError[PublishedMessage])
@@ -246,6 +248,9 @@ func (c *JSConn) SubscribeOrderered(ctx context.Context, stream string, cfg jets
 		for {
 			msg, err := consumer.Next(jetstream.FetchHeartbeat(59*time.Second), jetstream.FetchMaxWait(2*time.Minute))
 			if err != nil {
+				if errors.Is(err, nats.ErrTimeout) {
+					continue
+				}
 				if innerCtx.Err() != nil {
 					return
 				}
@@ -259,19 +264,15 @@ func (c *JSConn) SubscribeOrderered(ctx context.Context, stream string, cfg jets
 				log.Error("failed to get message metadata, closing", "err", err)
 				ch <- WithError[PublishedMessage]{
 					Error: err,
-					Item: PublishedMessage{
-						Subject: msg.Subject()}}
+					Item:  PublishedMessage{Subject: msg.Subject()}}
 				return
 			}
 
 			pm := NewPublishedMessage(msg, meta)
 
-			if pm.Sequence <= lastSequence {
-				log.Debug("not relaying message, already processed", "sequence", pm.Sequence, "lastSequence", lastSequence)
-				err = msg.Ack()
-				if err != nil {
-					log.Warn("failed to ack message", "err", err)
-				}
+			if lastSequence >= pm.Sequence {
+				log.Log(ctx, slog.LevelDebug-3, "not relaying message, already processed",
+					"sequence", pm.Sequence, "lastSequence", lastSequence)
 			}
 
 			select {
@@ -282,12 +283,6 @@ func (c *JSConn) SubscribeOrderered(ctx context.Context, stream string, cfg jets
 			}
 
 			lastSequence = pm.Sequence
-
-			err = msg.Ack()
-			if err != nil {
-				log.Warn("failed to ack message", "err", err)
-				// TODO: Consider failure modes. Does failed ack imply redeliver?
-			}
 		}
 	}()
 
@@ -330,6 +325,20 @@ func (c *JSConn) GetMessageWithSequence(ctx context.Context, stream string, sequ
 
 	pm := NewPublishedMessage(msg, meta)
 	return []PublishedMessage{pm}, nil
+}
+
+func (c *JSConn) CreateStream(ctx context.Context, cfg jetstream.StreamConfig) error {
+	js, err := c.Connect(ctx)
+	if err != nil {
+		return errors.Wrap(err, "failed to connect to nats")
+	}
+
+	_, err = js.CreateStream(ctx, cfg)
+	if err != nil {
+		return errors.Wrap(err, "failed to create stream")
+	}
+
+	return nil
 }
 
 func logWithConsumerConfig(log *slog.Logger, cfg jetstream.OrderedConsumerConfig) *slog.Logger {
