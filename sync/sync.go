@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
-	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -13,6 +12,7 @@ import (
 	v1 "github.com/bredtape/gateway/sync/v1"
 	"github.com/bredtape/retry"
 	"github.com/bredtape/set"
+	"github.com/bredtape/slogging"
 	"github.com/nats-io/nats.go/jetstream"
 	"github.com/pkg/errors"
 	"google.golang.org/protobuf/proto"
@@ -157,10 +157,23 @@ func (ns *natsSync) loop(ctx context.Context, log *slog.Logger) error {
 		ns.state = state
 	}
 
-	syncRequestsCh, err := ns.SubscribeToSync(ctx)
+	// register sync stream itself. Do not specify FilterSubjects, as we want to see
+	// all messages to determine when head has been reached
+	err := ns.state.RegisterStartSync(&v1.StartSyncRequest{
+		SourceStreamName: ns.syncStream,
+		SourceDeployment: ns.from.String(),
+		SinkDeployment:   ns.to.String()})
 	if err != nil {
-		return errors.Wrap(err, "failed to subscribe to sync stream")
+		return errors.Wrap(err, "failed to register start sync for 'sync' itself")
 	}
+
+	syncSubKey := SourceSubscriptionKey{SourceStreamName: ns.syncStream}
+
+	syncHeadSequence, err := ns.js.GetLastSequence(ctx, ns.syncStream)
+	if err != nil {
+		return errors.Wrap(err, "failed to get last sequence for sync stream")
+	}
+	log.Debug("got last sequence for sync stream", "sequence", syncHeadSequence)
 
 	realIncomingCh, err := ns.exchange.StartReceiving(ctx)
 	if err != nil {
@@ -238,6 +251,12 @@ func (ns *natsSync) loop(ctx context.Context, log *slog.Logger) error {
 				return errors.New("incoming channel closed")
 			}
 
+			if !ns.matchesThisDeployment(msg) {
+				log.Debug("ignoring batch, not matching this deployment",
+					"batchFrom", msg.GetFromDeployment(), "batchTo", msg.GetToDeployment())
+				continue
+			}
+
 			log.Log(ctx, slog.LevelDebug-3, "received incoming message")
 			err := ns.handleIncomingRemoteMessage(msg)
 			if err != nil {
@@ -249,62 +268,47 @@ func (ns *natsSync) loop(ctx context.Context, log *slog.Logger) error {
 				return errors.New("source messages channel closed")
 			}
 
-			log2 := log.With("sourceSubscriptionKey", msg.SourceSubscriptionKey, "lastSequence", msg.LastSequence, "count", len(msg.Messages))
+			log2 := log.With("sourceSubscriptionKey", msg.SourceSubscriptionKey,
+				"lastSequence", msg.LastSequence,
+				"count", len(msg.Messages))
 			if msg.Error != nil {
-				log2.Warn("failed to receive source message, will cancel subscription", "err", msg.Error)
+				log2.Warn("failed to receive source message, will cancel subscription (and then later start it again)", "err", msg.Error)
 				ns.sourceCancelSubscription(log2, msg.SourceSubscriptionKey)
+				continue
+			}
+
+			if msg.SourceSubscriptionKey == syncSubKey {
+				ns.handleSyncMessage(log2, msg)
+
+				if msg.LastSequence >= SourceSequence(syncHeadSequence) {
+					reachedSyncHead = true
+					log.Debug("reached sync head", "lastSequence", msg.LastSequence)
+				}
+
 				continue
 			}
 
 			count, err := ns.state.SourceDeliverFromLocal(msg.SourceSubscriptionKey, msg.LastSequence, msg.Messages...)
 			if err != nil {
-				log2.Debug("failed to deliver message", "err", err)
+				log2.Debug("failed to deliver message", "err", err,
+					"operation", "state/SourceDeliverFromLocal")
 				if errors.Is(err, ErrSourceSequenceBroken) {
 					log2.Debug("cancelling subscription")
 					ns.sourceCancelSubscription(log2, msg.SourceSubscriptionKey)
 				}
 			} else {
-				log2.Debug("delivered message", "count", count)
-			}
-
-		case msg, ok := <-syncRequestsCh:
-			if !ok {
-				return errors.New("sync channel closed")
-			}
-
-			if msg.Error != nil {
-				log.Warn("failed to receive sync request (ignoring)", "err", msg.Error)
-				continue
-			}
-
-			// enable incoming messages when all existing sync requests have been processed
-			if msg.Item.ReachedHead {
-				reachedSyncHead = true
-				log.Debug("reached sync head", "subscriptionKeys", ns.state.GetSourceLocalSubscriptionKeys())
-			}
-
-			if msg.Item.StartSyncRequest != nil {
-				err := ns.state.RegisterStartSync(msg.Item.StartSyncRequest)
-				if err != nil {
-					log.Warn("failed to register start sync", "err", err,
-						"sourceStreamName", msg.Item.StartSyncRequest.SourceStreamName,
-						"sourceDeployment", msg.Item.StartSyncRequest.SourceDeployment,
-						"sinkDeployment", msg.Item.StartSyncRequest.SinkDeployment)
-				} else {
-					log.Debug("registered start sync", "sourceStreamName", msg.Item.StartSyncRequest.SourceStreamName, "sequence", msg.Item.Sequence)
-				}
-			} else if msg.Item.StopSyncRequest != nil {
-				err := ns.state.RegisterStopSync(msg.Item.StopSyncRequest)
-				if err != nil {
-					log.Warn("failed to register stop sync", "err", err,
-						"sourceStreamName", msg.Item.StopSyncRequest.SourceStreamName,
-						"sourceDeployment", msg.Item.StopSyncRequest.SourceDeployment,
-						"sinkDeployment", msg.Item.StopSyncRequest.SinkDeployment)
-				} else {
-					log.Debug("registered stop sync", "sourceStreamName", msg.Item.StartSyncRequest.SourceStreamName, "sequence", msg.Item.Sequence)
-				}
+				log2.Debug("delivered message", "acceptedCount", count)
 			}
 		}
+	}
+}
+
+// source, cancel subscription
+func (ns *natsSync) sourceCancelSubscription(log *slog.Logger, key SourceSubscriptionKey) {
+	if cancel, exists := ns.sourceSubscriptions[key]; exists {
+		cancel()
+		delete(ns.sourceSubscriptions, key)
+		log.Debug("cancelled subscription", "sourceSubscriptionKey", key)
 	}
 }
 
@@ -318,9 +322,9 @@ func (ns *natsSync) sourceStartSubscriptions(ctx context.Context, log *slog.Logg
 	}
 
 	for key := range missing {
-		sub, found := ns.state.GetSourceLocalSubscriptions(key)
+		sub, found := ns.state.GetSourceLocalSubscription(key)
 		if !found {
-			log.Error("subscription not found", "key", key)
+			slogging.Fatal(log, "subscription not found", "key", key)
 			continue
 		}
 
@@ -332,7 +336,10 @@ func (ns *natsSync) sourceStartSubscriptions(ctx context.Context, log *slog.Logg
 			continue
 		}
 
-		log.Debug("started subscription", "sourceStreamName", sub.SourceStreamName)
+		log.Debug("started subscription",
+			"sourceStreamName", sub.SourceStreamName,
+			"deliverPolicy", sub.DeliverPolicy,
+			"optStartSeq", sub.OptStartSeq)
 		ns.sourceSubscriptions[key] = cancel
 	}
 }
@@ -352,7 +359,7 @@ func (ns *natsSync) sourceStartSubscription(ctx context.Context, incoming chan<-
 		DeliverPolicy:  sub.DeliverPolicy,
 		OptStartSeq:    uint64(sub.OptStartSeq),
 		OptStartTime:   &sub.OptStartTime,
-		FilterSubjects: []string{sub.SourceStreamName}}
+		FilterSubjects: sub.FilterSubjects}
 
 	lastSequence := SourceSequence(0)
 	if sub.DeliverPolicy == jetstream.DeliverByStartSequencePolicy {
@@ -386,19 +393,20 @@ func (ns *natsSync) sourceStartSubscription(ctx context.Context, incoming chan<-
 					m.Messages = []*v1.Msg{publishedMessageToV1(msg.Item)}
 				}
 
-				log.Log(ctx, slog.LevelDebug-3, "have message to sent", "lastSequence", lastSequence)
+				log2 := log.With("lastSequence", lastSequence, "sequence", msg.Item.Sequence)
+				log2.Log(ctx, slog.LevelDebug-3, "have message to sent")
 				select {
 				case <-ctx.Done():
 					return
 				case incoming <- m:
-					log.Log(ctx, slog.LevelDebug-3, "message was relayed", "lastSequence", lastSequence)
+					log2.Log(ctx, slog.LevelDebug-3, "message was relayed")
 				}
 
 				lastSequence = SourceSequence(msg.Item.Sequence)
 				lastActivity = time.Now()
 
 			case <-heartbeatTimer:
-				// there was some activity since last heartbeat
+				// there was some activity since last heartbeat, adjust timer
 				if time.Since(lastActivity) < heartbeatInterval {
 					heartbeatTimer = time.After(heartbeatInterval - time.Since(lastActivity))
 					continue
@@ -423,15 +431,6 @@ func (ns *natsSync) sourceStartSubscription(ctx context.Context, incoming chan<-
 	return nil
 }
 
-// source, cancel subscription
-func (ns *natsSync) sourceCancelSubscription(log *slog.Logger, key SourceSubscriptionKey) {
-	if cancel, exists := ns.sourceSubscriptions[key]; exists {
-		cancel()
-		delete(ns.sourceSubscriptions, key)
-		log.Debug("cancelled subscription", "sourceSubscriptionKey", key)
-	}
-}
-
 // write buffered incoming messages to nats stream
 func (ns *natsSync) sinkProcessIncoming(ctx context.Context, log *slog.Logger) {
 	for key, xs := range ns.state.SinkIncoming {
@@ -449,9 +448,8 @@ func (ns *natsSync) sinkProcessIncoming(ctx context.Context, log *slog.Logger) {
 
 			log2 := log.With(
 				"sourceStreamName", msgs.GetSourceStreamName(),
-				"sourceSequence", lastPair.SourceSequence,
-				"sinkSequence", lastPair.SinkSequence,
-				"msgsRange", r.String())
+				"msgsRange", r.String(),
+				"lastPair", lastPair.String())
 
 			if lastPair.SourceSequence > r.To {
 				err := ns.state.SinkCommitReject(msgs, lastPair.SourceSequence)
@@ -477,6 +475,8 @@ func (ns *natsSync) sinkProcessIncoming(ctx context.Context, log *slog.Logger) {
 					continue
 				}
 				skipCount += len(msgs.GetMessages())
+
+				log2.Log(ctx, slog.LevelDebug-3, "not processing incoming Msgs (because sequence does not match)")
 				continue
 			}
 
@@ -494,14 +494,15 @@ func (ns *natsSync) sinkProcessIncoming(ctx context.Context, log *slog.Logger) {
 
 				log2.Error("failed to publish messages. Will retry, later", "err", err)
 				continue
-			} else {
-				log2.Log(ctx, slog.LevelDebug-3, "published messages")
-				ns.sinkLastSequence[key] = seq
+			}
 
-				err = ns.state.SinkCommit(msgs)
-				if err != nil {
+			log2.Log(ctx, slog.LevelDebug-3, "published messages")
+			ns.sinkLastSequence[key] = seq
 
-				}
+			err = ns.state.SinkCommit(msgs)
+			if err != nil {
+				log2.Debug("failed to commit messages. Ignoring", "err", err)
+				panic("failed to commit messages")
 			}
 		}
 	}
@@ -512,12 +513,27 @@ func (ns *natsSync) handleIncomingRemoteMessage(msg *v1.MessageBatch) error {
 	log.Debug("received batch", "msg", msg)
 	now := time.Now()
 
+	if msg.GetToDeployment() != ns.from.String() {
+		return fmt.Errorf("unexpected 'to' deployment %s", msg.GetToDeployment())
+	}
+	if msg.GetFromDeployment() != ns.to.String() {
+		return fmt.Errorf("unexpected 'from' deployment %s", msg.GetFromDeployment())
+	}
+
 	for _, ack := range msg.Acknowledges {
-		err := ns.state.SourceHandleSinkAck(now, msg.SentTimestamp.AsTime(), ack)
+		wasPending, err := ns.state.SourceHandleSinkAck(now, msg.SentTimestamp.AsTime(), ack)
 		if err != nil {
 			log.Debug("failed to handle sink ack", "err", err, "ack", ack)
 			return errors.Wrap(err, "failed to handle sink ack")
 		}
+		logMsg := "processed sink ack"
+		if !wasPending {
+			logMsg = "ignored sink ack"
+		}
+		log.Log(context.Background(), slog.LevelDebug-3, logMsg,
+			"isNegative", ack.IsNegative, "reason", ack.Reason,
+			"setId", ack.SetId, "sequenceFrom", ack.SequenceFrom,
+			"sequenceTo", ack.SequenceTo)
 	}
 
 	for _, m := range msg.ListOfMessages {
@@ -526,6 +542,11 @@ func (ns *natsSync) handleIncomingRemoteMessage(msg *v1.MessageBatch) error {
 			log.Debug("failed to deliver message", "err", err, "msg", m)
 			return errors.Wrap(err, "failed to deliver message")
 		}
+
+		key := SinkSubscriptionKey{SourceStreamName: m.GetSourceStreamName()}
+		log.Log(context.Background(), slog.LevelDebug-3, "delivered message",
+			"setId", m.GetSetId(), "sourceStreamName", m.GetSourceStreamName(),
+			"count", len(m.GetMessages()), "sinkIncomingCount", len(ns.state.SinkIncoming[key]))
 	}
 
 	return nil
@@ -543,114 +564,61 @@ type SyncRequests struct {
 	StopSyncRequest  *v1.StopSyncRequest
 }
 
-// subscribe to published sync requests.
-// Will block if nothing exists.
-// Will send an empty SyncRequests with ReachedHead=true when all existing requests have been sent.
-func (ns *natsSync) SubscribeToSync(ctx context.Context) (chan WithError[SyncRequests], error) {
-	// determine head sequence
-	var headSequence uint64
-	{
-		subCtx, cancel := context.WithCancel(ctx)
-		defer cancel()
+// handle sync message. Errors will be ignored (just logged).
+func (ns *natsSync) handleSyncMessage(parentLog *slog.Logger, spm sourcePublishedMessage) {
 
-		// only deliver last to obtain 'head' sequence
-		cfg := jetstream.OrderedConsumerConfig{
-			DeliverPolicy:  jetstream.DeliverLastPolicy,
-			FilterSubjects: ns.getSyncStreamFilterSubjects()}
-		ch, err := ns.js.SubscribeOrderered(subCtx, ns.syncStream, cfg)
-		if err != nil {
-			return nil, errors.Wrap(err, "failed to subscribe to sync stream")
+	for _, pm := range spm.Messages {
+		log := parentLog.With("operation", "handleSyncMessage",
+			"sourceStreamName", spm.SourceSubscriptionKey.SourceStreamName,
+			"lastSequence", spm.LastSequence,
+			"sequence", pm.Sequence)
+		log.Debug("received sync message")
+
+		if pm.Headers[headerContentType] != contentTypeProto {
+			log.Error("invalid content-type", "contentType", pm.Headers[headerContentType])
+			continue
+		}
+		if len(pm.Data) == 0 {
+			log.Error("missing header "+headerGrpcMessageType, "contentType", pm.Headers[headerContentType])
+			continue
 		}
 
-		for msg := range ch {
-			headSequence = msg.Item.Sequence
-			break
+		msgType := pm.Headers[headerGrpcMessageType]
+		switch msgType {
+		case startSyncRequestName:
+			var msg v1.StartSyncRequest
+			err := proto.Unmarshal(pm.Data, &msg)
+			if err != nil {
+				log.Error("failed to unmarshal start sync request", "err", err)
+				continue
+			}
+			err = ns.state.RegisterStartSync(&msg)
+			if err != nil {
+				log.Error("failed to register start sync", "err", err)
+				continue
+			}
+			log.Debug("registered start sync request",
+				"source", msg.GetSourceDeployment(), "sink", msg.GetSinkDeployment(), "sourceStream", msg.GetSourceStreamName())
+
+		case stopSyncRequestName:
+			var msg v1.StopSyncRequest
+			err := proto.Unmarshal(pm.Data, &msg)
+			if err != nil {
+				log.Error("failed to unmarshal stop sync request", "err", err)
+				continue
+			}
+			err = ns.state.RegisterStopSync(&msg)
+			if err != nil {
+				log.Error("failed to register stop sync", "err", err)
+				continue
+			}
+			log.Debug("registered stop sync request",
+				"source", msg.GetSourceDeployment(), "sink", msg.GetSinkDeployment(), "sourceStream", msg.GetSourceStreamName())
+
+		default:
+			log.Warn("unknown message type", "type", msgType[0])
 		}
-
-		cancel()
 	}
-
-	if headSequence == 0 {
-		return nil, errors.New("failed to get head sequence")
-	}
-
-	cfg := jetstream.OrderedConsumerConfig{
-		DeliverPolicy:  jetstream.DeliverLastPerSubjectPolicy,
-		FilterSubjects: ns.getSyncStreamFilterSubjects()}
-
-	ch, err := ns.js.SubscribeOrderered(ctx, ns.syncStream, cfg)
-	if err != nil {
-		return nil, errors.Wrap(err, "failed to subscribe to sync stream")
-	}
-
-	resultCh := make(chan WithError[SyncRequests])
-	go func() {
-		defer close(resultCh)
-
-		reachedHead := false
-		for msg := range ch {
-			if msg.Error != nil {
-				resultCh <- WithError[SyncRequests]{Error: msg.Error}
-				return
-			}
-
-			pm := msg.Item
-			result := WithError[SyncRequests]{
-				Item: SyncRequests{
-					PublishedMessage: pm,
-					ReachedHead:      reachedHead}}
-			if !slices.Equal(pm.Headers[headerContentType], []string{contentTypeProto}) {
-				result.Error = errors.New("invalid content-type")
-			} else if len(pm.Data) == 0 {
-				result.Error = errors.New("missing header " + headerGrpcMessageType)
-			} else {
-
-				msgType := pm.Headers[headerGrpcMessageType]
-				switch msgType[0] {
-				case startSyncRequestName:
-					var msg v1.StartSyncRequest
-					err = proto.Unmarshal(pm.Data, &msg)
-					if err != nil {
-						result.Error = errors.Wrap(err, "failed to unmarshal start sync request")
-					} else {
-						result.Item.StartSyncRequest = &msg
-					}
-				case stopSyncRequestName:
-					var msg v1.StopSyncRequest
-					err = proto.Unmarshal(pm.Data, &msg)
-					if err != nil {
-						result.Error = errors.Wrap(err, "failed to unmarshal stop sync request")
-					} else {
-						result.Item.StopSyncRequest = &msg
-					}
-				default:
-					result.Error = errors.Errorf("unknown message type %s", msgType[0])
-				}
-			}
-
-			select {
-			case <-ctx.Done():
-				return
-			case resultCh <- result:
-			}
-
-			// signal that all existing requests have been sent
-			if !reachedHead && pm.Sequence >= headSequence {
-				m := WithError[SyncRequests]{
-					Item: SyncRequests{
-						PublishedMessage: pm,
-						ReachedHead:      true}}
-
-				select {
-				case <-ctx.Done():
-					return
-				case resultCh <- m:
-					reachedHead = true
-				}
-			}
-		}
-	}()
-	return resultCh, nil
 }
 
 func (ns *natsSync) getSyncStreamFilterSubjects() []string {
@@ -718,9 +686,9 @@ func (ns *natsSync) getLastSourceSinkSequencePublished(ctx context.Context, key 
 		SinkSequence:   SinkSequence(sinkSeq)}, nil
 }
 
-// func (ns *natsSync) getMatchingSourceSequence(ctx context.Context, sub *v1.Subscription) SinkSubscriptionKey {
-
-// }
+func (ns *natsSync) matchesThisDeployment(b *v1.MessageBatch) bool {
+	return b.GetToDeployment() == ns.from.String() && b.GetFromDeployment() == ns.to.String()
+}
 
 func getMsgsRange(m *v1.Msgs) RangeInclusive[SourceSequence] {
 	r := RangeInclusive[SourceSequence]{
@@ -750,6 +718,10 @@ type SourceSinkSequence struct {
 
 	// sequence number at the sink, matching the source message
 	SinkSequence SinkSequence
+}
+
+func (s SourceSinkSequence) String() string {
+	return fmt.Sprintf("[source %d, sink %d]", s.SourceSequence, s.SinkSequence)
 }
 
 type SourceSequence uint64

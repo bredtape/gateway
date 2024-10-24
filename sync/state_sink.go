@@ -10,6 +10,7 @@ import (
 	v1 "github.com/bredtape/gateway/sync/v1"
 	"github.com/nats-io/nats.go/jetstream"
 	"github.com/pkg/errors"
+	"github.com/smartystreets/goconvey/convey"
 )
 
 // sink deliver messages from remote to internal buffer (in-memory), waiting to be committed
@@ -18,7 +19,7 @@ func (s *state) SinkDeliverFromRemote(t time.Time, msgs *v1.Msgs) error {
 	key := sub.SinkSubscriptionKey
 
 	if sub.SinkDeployment != s.from {
-		return errors.Errorf("sink deployment does not match, expected %s, got %s", s.to, sub.SinkDeployment)
+		return errors.Errorf("sink deployment 'to' does not match, expected %s, got %s", s.from, sub.SinkDeployment)
 	}
 
 	subRegistered, exists := s.sinkSubscription[key]
@@ -27,6 +28,7 @@ func (s *state) SinkDeliverFromRemote(t time.Time, msgs *v1.Msgs) error {
 	}
 
 	if !subRegistered.Equals(sub) {
+		convey.Printf("subRegistered: %v, received %v", subRegistered, sub)
 		return errors.Wrap(ErrNoSubscription, "subscription does not match")
 	}
 
@@ -138,7 +140,7 @@ func (s *state) SinkCommitReject(msgs *v1.Msgs, lastSequence SourceSequence) err
 			SetId:            msgs.GetSetId(),
 			SourceStreamName: msgs.GetSourceStreamName(),
 			SequenceFrom:     uint64(lastSequence),
-			IsNak:            true,
+			IsNegative:       true,
 			Reason:           fmt.Sprintf("sink rejected range %s, request restart (lastSequence %d)", seq.String(), lastSequence)}
 
 		if _, exists := s.sinkCommit[key]; !exists {
@@ -221,7 +223,7 @@ func (w *SinkCommitWindow) Commit(ack *v1.Acknowledge) {
 	id := SetID(ack.GetSetId())
 	w.PendingAcks[id] = ack
 
-	if ack.IsNak {
+	if ack.IsNegative {
 		w.CommittedExtrema = RangeInclusive[uint64]{
 			From: ack.GetSequenceFrom(),
 			To:   ack.GetSequenceFrom()}

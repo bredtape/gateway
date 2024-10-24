@@ -108,7 +108,7 @@ func NewFileExchange(c FileExchangeConfig) (*FileExchange, error) {
 // The files will be deleted after the content has been read.
 // Do not assume any order
 func (ex *FileExchange) StartReceiving(ctx context.Context) (<-chan *v1.MessageBatch, error) {
-	log := slog.With("incomingDirectory", ex.inDir)
+	log := slog.With("module", "sync", "operation", "FileExchange/StartReceiving", "incomingDirectory", ex.inDir)
 
 	// Create new watcher.
 	watcher, err := fsnotify.NewWatcher()
@@ -154,7 +154,7 @@ func (ex *FileExchange) StartReceiving(ctx context.Context) (<-chan *v1.MessageB
 					return
 				}
 				log2 := log.With("source", "polling", "basename", path.Base(event.Name), "op", event.Op.String())
-				log2.Log(ctx, slog.LevelDebug-3, "received event")
+				log2.Log(ctx, slog.LevelDebug-6, "received event")
 
 				if event.Op.Has(fsnotify.Create) {
 					msg, err := ex.consumeFile(event.Name)

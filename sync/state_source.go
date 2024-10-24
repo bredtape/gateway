@@ -20,7 +20,7 @@ func (s *state) GetSourceLocalSubscriptionKeys() []SourceSubscriptionKey {
 }
 
 // requested local subscription (may be different from original subscription)
-func (s *state) GetSourceLocalSubscriptions(key SourceSubscriptionKey) (SourceSubscription, bool) {
+func (s *state) GetSourceLocalSubscription(key SourceSubscriptionKey) (SourceSubscription, bool) {
 	sub, exists := s.sourceOriginalSubscription[key]
 	if !exists {
 		return SourceSubscription{}, false
@@ -118,8 +118,8 @@ func (s *state) SourceDeliverFromLocal(key SourceSubscriptionKey, lastSequence S
 		}
 	}
 
-	if len(messages) > 0 && SourceSequence(messages[0].Sequence) <= lastSequence {
-		return 0, errors.Wrapf(ErrSourceSequenceBroken, "message sequence %d must be after lastSequence %d", messages[0].Sequence, lastSequence)
+	if len(messages) > 0 && SourceSequence(messages[0].Sequence) < lastSequence {
+		return 0, errors.Wrapf(ErrSourceSequenceBroken, "message sequence %d should be at least lastSequence %d", messages[0].Sequence, lastSequence)
 	}
 
 	// only checks before this point
@@ -135,9 +135,9 @@ func (s *state) SourceDeliverFromLocal(key SourceSubscriptionKey, lastSequence S
 		w.Extrema.From = 0
 	}
 
-	if acceptCount > 0 {
-		w.Extrema.To = SourceSequence(messages[acceptCount-1].GetSequence())
-	}
+	// if acceptCount > 0 {
+	// 	w.Extrema.To = SourceSequence(messages[acceptCount-1].GetSequence())
+	// }
 
 	// prune existing messages if subscription was restarted
 	if s.sourceOutgoing == nil || lastSequence == 0 {
@@ -219,23 +219,24 @@ func (s *state) repackMessages(key SourceSubscriptionKey, ids []SetID) []*v1.Msg
 
 // handle incoming ack from sink deployment
 // ack may be out or order (so the sequence from/to are out of order)
-func (s *state) SourceHandleSinkAck(currentTime, sentTime time.Time, ack *v1.Acknowledge) error {
+// Returns true if the ack was actual pending (but may not have changed anything), false if the ack was ignored
+func (s *state) SourceHandleSinkAck(currentTime, sentTime time.Time, ack *v1.Acknowledge) (bool, error) {
 	key := SourceSubscriptionKey{SourceStreamName: ack.GetSourceStreamName()}
 
 	_, exists := s.sourceOriginalSubscription[key]
 	if !exists {
-		return errors.Wrapf(ErrNoSubscription, "no subscription for key %v", key)
+		return false, errors.Wrapf(ErrNoSubscription, "no subscription for key %v", key)
 	}
 
 	w, exists := s.sourceAckWindows[key]
 	if !exists {
 		// no outstanding acks, ignore
-		return nil
+		return false, nil
 	}
 
 	p := SourcePendingAck{
 		SetID:         SetID(ack.GetSetId()),
-		IsNAK:         ack.GetIsNak(),
+		IsNegative:    ack.GetIsNegative(),
 		SentTimestamp: sentTime,
 		SequenceRange: RangeInclusive[SourceSequence]{
 			From: SourceSequence(ack.GetSequenceFrom()),
@@ -245,13 +246,13 @@ func (s *state) SourceHandleSinkAck(currentTime, sentTime time.Time, ack *v1.Ack
 
 	// only checks before this point
 
-	err := w.ReceiveAck(currentTime, p)
+	wasPending, err := w.ReceiveAck(currentTime, p)
 	if err != nil {
-		return errors.Wrap(err, "failed to process ack")
+		return false, errors.Wrap(err, "failed to process ack")
 	}
 
 	// if nak, delete pending messages
-	if p.IsNAK {
+	if p.IsNegative {
 		// keep messages from Extrema.To, if found
 		if w.Extrema.To > 0 {
 			keepers := keepMessagesFrom(s.sourceOutgoing[key], uint64(w.Extrema.To))
@@ -264,7 +265,7 @@ func (s *state) SourceHandleSinkAck(currentTime, sentTime time.Time, ack *v1.Ack
 		}
 	}
 
-	return nil
+	return wasPending, nil
 }
 
 // description at source nats stream

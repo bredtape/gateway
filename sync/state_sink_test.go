@@ -11,12 +11,12 @@ import (
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
-// test state for where messages are incoming to use
+// test state for where messages are incoming
 func TestStateSinkBasic(t *testing.T) {
 	Convey("init state", t, func() {
-		from := gateway.Deployment("xx")
-		to := gateway.Deployment("yy")
-		s, err := newState(to, from, testDefaultComm, nil)
+		fromSink := gateway.Deployment("yy") // sink in this scenario
+		toSource := gateway.Deployment("xx") // source in this scenario
+		s, err := newState(fromSink, toSource, testDefaultComm, nil)
 		So(err, ShouldBeNil)
 
 		msg1 := &v1.Msg{
@@ -32,8 +32,8 @@ func TestStateSinkBasic(t *testing.T) {
 
 		Convey("register subscription, with this deployment as the sink", func() {
 			req := &v1.StartSyncRequest{
-				SourceDeployment: from.String(),
-				SinkDeployment:   to.String(),
+				SourceDeployment: "xx",
+				SinkDeployment:   "yy",
 				SourceStreamName: "stream1",
 				ConsumerConfig:   &v1.ConsumerConfig{DeliverPolicy: v1.DeliverPolicy_DELIVER_POLICY_ALL}}
 			err := s.RegisterStartSync(req)
@@ -41,7 +41,7 @@ func TestStateSinkBasic(t *testing.T) {
 
 			Convey("should not have local subscription", func() {
 				key := SourceSubscriptionKey{SourceStreamName: "stream1"}
-				_, exists := s.GetSourceLocalSubscriptions(key)
+				_, exists := s.GetSourceLocalSubscription(key)
 				So(exists, ShouldBeFalse)
 			})
 
@@ -81,6 +81,13 @@ func TestStateSinkBasic(t *testing.T) {
 						b, err := s.CreateMessageBatch(time.Now())
 						So(err, ShouldBeNil)
 						So(b, ShouldNotBeNil)
+
+						Convey("from deployment", func() {
+							So(b.FromDeployment, ShouldEqual, "yy")
+						})
+						Convey("to deployment", func() {
+							So(b.ToDeployment, ShouldEqual, "xx")
+						})
 
 						Convey("batch should have ack for msg1", func() {
 							So(b.Acknowledges, ShouldHaveLength, 1)
@@ -332,7 +339,7 @@ func TestStateSinkNak(t *testing.T) {
 						nak := b1.Acknowledges[0]
 
 						Convey("should indicate nak", func() {
-							So(nak.IsNak, ShouldBeTrue)
+							So(nak.IsNegative, ShouldBeTrue)
 						})
 					})
 				})

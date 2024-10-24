@@ -181,10 +181,10 @@ message Acknowledge {
   // source seqeuence number to (inclusive)
   uint64 sequence_to = 4;
 
-  // to indicate not-acknowledge, in which case the subscription will be restarted.
+  // to indicate not-acknowledge (NAK), in which case the subscription will be restarted.
   // If sequence_from is set, the subscription will resume from that sequence.
   // Duplicates must be acknowledged
-  bool is_nak = 5;
+  bool is_negative = 5;
 
   // reason, should be specified when NAK
   // possible scenarios: message loss/corrupted, message missing (gap,

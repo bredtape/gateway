@@ -15,7 +15,6 @@ import (
 const syncStreamName = "sync"
 
 /*
-
 global options:
   --server     # nats server. Required
   --seed-file  # nats .nk seed file. Optional
@@ -31,12 +30,7 @@ command tree:
 
 	stream
 	  info [stream name] # get stream info
-
 */
-
-const (
-	app = "sync_cli"
-)
 
 func main() {
 	app := &cli.App{

@@ -58,7 +58,7 @@ func TestStateSourceBasic(t *testing.T) {
 			key := SourceSubscriptionKey{SourceStreamName: "stream1"}
 
 			Convey("should have source-subscription to deliver all", func() {
-				sub, exists := s.GetSourceLocalSubscriptions(key)
+				sub, exists := s.GetSourceLocalSubscription(key)
 				So(exists, ShouldBeTrue)
 				So(sub.DeliverPolicy, ShouldEqual, jetstream.DeliverAllPolicy)
 			})
@@ -69,7 +69,7 @@ func TestStateSourceBasic(t *testing.T) {
 				So(count, ShouldEqual, 1)
 
 				Convey("should have updated Subscriptions", func() {
-					sub, exists := s.GetSourceLocalSubscriptions(key)
+					sub, exists := s.GetSourceLocalSubscription(key)
 					So(exists, ShouldBeTrue)
 					So(sub.DeliverPolicy, ShouldEqual, jetstream.DeliverByStartSequencePolicy)
 					So(sub.OptStartSeq, ShouldEqual, 2)
@@ -89,6 +89,9 @@ func TestStateSourceBasic(t *testing.T) {
 						})
 						Convey("with target deployment", func() {
 							So(ms.SinkDeployment, ShouldEqual, "yy")
+						})
+						Convey("with last sequence", func() {
+							So(ms.GetLastSequence(), ShouldEqual, 0)
 						})
 						Convey("with consumer config, deliver all", func() {
 							So(ms.ConsumerConfig.DeliverPolicy, ShouldEqual, v1.DeliverPolicy_DELIVER_POLICY_ALL)
@@ -116,11 +119,12 @@ func TestStateSourceBasic(t *testing.T) {
 								SequenceFrom:     0,
 								SequenceTo:       2}
 
-							err := s.SourceHandleSinkAck(t1, t1, ack1)
+							wasPending, err := s.SourceHandleSinkAck(t1, t1, ack1)
 							So(err, ShouldBeNil)
+							So(wasPending, ShouldBeTrue)
 
 							Convey("should have updated Subscriptions, to be deliver from sequence 2", func() {
-								sub, exists := s.GetSourceLocalSubscriptions(key)
+								sub, exists := s.GetSourceLocalSubscription(key)
 								So(exists, ShouldBeTrue)
 								So(sub.DeliverPolicy, ShouldEqual, jetstream.DeliverByStartSequencePolicy)
 								So(sub.OptStartSeq, ShouldEqual, 2)
@@ -135,6 +139,10 @@ func TestStateSourceBasic(t *testing.T) {
 									batch2, errs := s.CreateMessageBatch(t1)
 									So(errs, ShouldBeNil)
 									So(batch2, ShouldNotBeNil)
+
+									Convey("with last sequence", func() {
+										So(batch2.ListOfMessages[0].GetLastSequence(), ShouldEqual, 2)
+									})
 
 									Convey("mark batch2 dispatched", func() {
 										report := s.MarkDispatched(batch2)
@@ -152,11 +160,12 @@ func TestStateSourceBasic(t *testing.T) {
 								SequenceFrom:     0,
 								SequenceTo:       2}
 
-							err := s.SourceHandleSinkAck(t1, t1, ack2)
+							wasPending, err := s.SourceHandleSinkAck(t1, t1, ack2)
 							So(err, ShouldBeNil)
+							So(wasPending, ShouldBeFalse)
 
 							Convey("should not have updated Subscriptions", func() {
-								sub, exists := s.GetSourceLocalSubscriptions(key)
+								sub, exists := s.GetSourceLocalSubscription(key)
 								So(exists, ShouldBeTrue)
 								So(sub.DeliverPolicy, ShouldEqual, jetstream.DeliverByStartSequencePolicy)
 								So(sub.OptStartSeq, ShouldEqual, 2)
@@ -184,11 +193,12 @@ func TestStateSourceBasic(t *testing.T) {
 										SequenceFrom:     0,
 										SequenceTo:       2}
 
-									err := s.SourceHandleSinkAck(t1, t1, ack1)
+									wasPending, err := s.SourceHandleSinkAck(t1, t1, ack1)
 									So(err, ShouldBeNil)
+									So(wasPending, ShouldBeTrue)
 
 									Convey("should have updated Subscriptions, to be deliver from sequence 4", func() {
-										sub, exists := s.GetSourceLocalSubscriptions(key)
+										sub, exists := s.GetSourceLocalSubscription(key)
 										So(exists, ShouldBeTrue)
 										So(sub.DeliverPolicy, ShouldEqual, jetstream.DeliverByStartSequencePolicy)
 										So(sub.OptStartSeq, ShouldEqual, 4)
@@ -201,8 +211,9 @@ func TestStateSourceBasic(t *testing.T) {
 											SequenceFrom:     2,
 											SequenceTo:       4}
 
-										err := s.SourceHandleSinkAck(t1, t1, ack2)
+										wasPending, err := s.SourceHandleSinkAck(t1, t1, ack2)
 										So(err, ShouldBeNil)
+										So(wasPending, ShouldBeTrue)
 									})
 								})
 
@@ -213,11 +224,12 @@ func TestStateSourceBasic(t *testing.T) {
 										SequenceFrom:     2,
 										SequenceTo:       4}
 
-									err := s.SourceHandleSinkAck(t1, t1, ack2)
+									wasPending, err := s.SourceHandleSinkAck(t1, t1, ack2)
 									So(err, ShouldBeNil)
+									So(wasPending, ShouldBeTrue)
 
 									Convey("should have _not_ have updated Subscriptions", func() {
-										sub, exists := s.GetSourceLocalSubscriptions(key)
+										sub, exists := s.GetSourceLocalSubscription(key)
 										So(exists, ShouldBeTrue)
 										So(sub.DeliverPolicy, ShouldEqual, jetstream.DeliverByStartSequencePolicy)
 										So(sub.OptStartSeq, ShouldEqual, 4)
@@ -424,16 +436,17 @@ func TestStateSourceNAK(t *testing.T) {
 						setID := b.ListOfMessages[0].SetId
 						nak := &v1.Acknowledge{
 							SetId:            setID,
-							IsNak:            true,
+							IsNegative:       true,
 							SourceStreamName: "stream1",
 							SequenceFrom:     0,
 							SequenceTo:       0}
 
-						err := s.SourceHandleSinkAck(time.Now(), time.Now(), nak)
+						wasPending, err := s.SourceHandleSinkAck(time.Now(), time.Now(), nak)
 						So(err, ShouldBeNil)
+						So(wasPending, ShouldBeTrue)
 
 						Convey("should have updated Subscriptions, to be deliver from sequence 0", func() {
-							sub, exists := s.GetSourceLocalSubscriptions(key)
+							sub, exists := s.GetSourceLocalSubscription(key)
 							So(exists, ShouldBeTrue)
 							So(sub.DeliverPolicy, ShouldEqual, jetstream.DeliverAllPolicy)
 						})
@@ -443,16 +456,17 @@ func TestStateSourceNAK(t *testing.T) {
 						setID := b.ListOfMessages[0].SetId
 						nak := &v1.Acknowledge{
 							SetId:            setID,
-							IsNak:            true,
+							IsNegative:       true,
 							SourceStreamName: "stream1",
 							SequenceFrom:     15,
 							SequenceTo:       0}
 
-						err := s.SourceHandleSinkAck(time.Now(), time.Now(), nak)
+						wasPending, err := s.SourceHandleSinkAck(time.Now(), time.Now(), nak)
 						So(err, ShouldBeNil)
+						So(wasPending, ShouldBeTrue)
 
 						Convey("should have updated Subscriptions, to be deliver from sequence 15", func() {
-							sub, exists := s.GetSourceLocalSubscriptions(key)
+							sub, exists := s.GetSourceLocalSubscription(key)
 							So(exists, ShouldBeTrue)
 							So(sub.DeliverPolicy, ShouldEqual, jetstream.DeliverByStartSequencePolicy)
 							So(sub.OptStartSeq, ShouldEqual, 15)
@@ -483,11 +497,12 @@ func TestStateSourceNAK(t *testing.T) {
 										SequenceFrom:     15,
 										SequenceTo:       16}
 
-									err := s.SourceHandleSinkAck(time.Now(), time.Now(), ack)
+									wasPending, err := s.SourceHandleSinkAck(time.Now(), time.Now(), ack)
 									So(err, ShouldBeNil)
+									So(wasPending, ShouldBeTrue)
 
 									Convey("should have updated Subscriptions, to be deliver from sequence 16", func() {
-										sub, exists := s.GetSourceLocalSubscriptions(key)
+										sub, exists := s.GetSourceLocalSubscription(key)
 										So(exists, ShouldBeTrue)
 										So(sub.DeliverPolicy, ShouldEqual, jetstream.DeliverByStartSequencePolicy)
 										So(sub.OptStartSeq, ShouldEqual, 16)
@@ -545,15 +560,16 @@ func TestStateSourceInit(t *testing.T) {
 					Convey("receive nak, with sequence_from 25", func() {
 						nak := &v1.Acknowledge{
 							SetId:            setID1,
-							IsNak:            true,
+							IsNegative:       true,
 							SourceStreamName: "stream1",
 							SequenceFrom:     25}
 
-						err := s.SourceHandleSinkAck(time.Now(), time.Now(), nak)
+						wasPending, err := s.SourceHandleSinkAck(time.Now(), time.Now(), nak)
 						So(err, ShouldBeNil)
+						So(wasPending, ShouldBeTrue)
 
 						Convey("should have updated Subscriptions, to be deliver from sequence 25", func() {
-							sub, exists := s.GetSourceLocalSubscriptions(key)
+							sub, exists := s.GetSourceLocalSubscription(key)
 							So(exists, ShouldBeTrue)
 							So(sub.DeliverPolicy, ShouldEqual, jetstream.DeliverByStartSequencePolicy)
 							So(sub.OptStartSeq, ShouldEqual, 25)
@@ -573,13 +589,14 @@ func TestStateSourceInit(t *testing.T) {
 						Convey("receive nak, with sequence_from 25", func() {
 							nak := &v1.Acknowledge{
 								SetId:            setID1,
-								IsNak:            true,
+								IsNegative:       true,
 								SourceStreamName: "stream1",
 								SequenceFrom:     25,
 								SequenceTo:       0}
 
-							err := s.SourceHandleSinkAck(time.Now(), time.Now(), nak)
+							wasPending, err := s.SourceHandleSinkAck(time.Now(), time.Now(), nak)
 							So(err, ShouldBeNil)
+							So(wasPending, ShouldBeTrue)
 
 							Convey("deliver message from 25", func() {
 								msg3 := &v1.Msg{
@@ -604,13 +621,14 @@ func TestStateSourceInit(t *testing.T) {
 							Convey("receive nak from batch#1, with sequence_from 25", func() {
 								nak1 := &v1.Acknowledge{
 									SetId:            setID1,
-									IsNak:            true,
+									IsNegative:       true,
 									SourceStreamName: "stream1",
 									SequenceFrom:     25,
 									SequenceTo:       0}
 
-								err := s.SourceHandleSinkAck(time.Now(), time.Now(), nak1)
+								wasPending, err := s.SourceHandleSinkAck(time.Now(), time.Now(), nak1)
 								So(err, ShouldBeNil)
+								So(wasPending, ShouldBeTrue)
 
 								Convey("deliver message from 25", func() {
 									msg3 := &v1.Msg{
@@ -639,16 +657,17 @@ func TestStateSourceInit(t *testing.T) {
 										Convey("receive nak from batch#2, with sequence_from 25", func() {
 											nak2 := &v1.Acknowledge{
 												SetId:            setID2,
-												IsNak:            true,
+												IsNegative:       true,
 												SourceStreamName: "stream1",
 												SequenceFrom:     25,
 												SequenceTo:       0}
 
-											err := s.SourceHandleSinkAck(time.Now(), time.Now(), nak2)
+											wasPending, err := s.SourceHandleSinkAck(time.Now(), time.Now(), nak2)
 											So(err, ShouldBeNil)
+											So(wasPending, ShouldBeFalse)
 
 											Convey("should not reset subscription", func() {
-												sub, exists := s.GetSourceLocalSubscriptions(key)
+												sub, exists := s.GetSourceLocalSubscription(key)
 												So(exists, ShouldBeTrue)
 												So(sub.DeliverPolicy, ShouldEqual, jetstream.DeliverByStartSequencePolicy)
 												So(sub.OptStartSeq, ShouldEqual, 26)
@@ -674,16 +693,17 @@ func TestStateSourceInit(t *testing.T) {
 									Convey("receive nak from batch#2, with sequence_from 25", func() {
 										nak2 := &v1.Acknowledge{
 											SetId:            setID2,
-											IsNak:            true,
+											IsNegative:       true,
 											SourceStreamName: "stream1",
 											SequenceFrom:     25,
 											SequenceTo:       0}
 
-										err := s.SourceHandleSinkAck(time.Now(), time.Now(), nak2)
+										wasPending, err := s.SourceHandleSinkAck(time.Now(), time.Now(), nak2)
 										So(err, ShouldBeNil)
+										So(wasPending, ShouldBeFalse)
 
 										Convey("should not reset subscription", func() {
-											sub, exists := s.GetSourceLocalSubscriptions(key)
+											sub, exists := s.GetSourceLocalSubscription(key)
 											So(exists, ShouldBeTrue)
 											So(sub.DeliverPolicy, ShouldEqual, jetstream.DeliverByStartSequencePolicy)
 											So(sub.OptStartSeq, ShouldEqual, 26)
@@ -773,6 +793,9 @@ func TestStateSourceAckTimeout(t *testing.T) {
 
 							Convey("mark batch#2 dispatched", func() {
 								report := s.MarkDispatched(b2)
+								if !report.IsEmpty() {
+									Printf("report: %v", report)
+								}
 								So(report.IsEmpty(), ShouldBeTrue)
 
 								Convey("no ack received within timeout (1 sec), should retransmit after 5 sec", func() {
@@ -866,8 +889,9 @@ func TestStateSourceHeartbeat(t *testing.T) {
 							SequenceFrom:     0,
 							SequenceTo:       1}
 
-						err := s.SourceHandleSinkAck(t1, t1, ack1)
+						wasPending, err := s.SourceHandleSinkAck(t1, t1, ack1)
 						So(err, ShouldBeNil)
+						So(wasPending, ShouldBeTrue)
 
 						Convey("no ack received within heartbeat interval (1 min), should send heartbeat after 1 min", func() {
 							t2 := t1.Add(1 * time.Minute)

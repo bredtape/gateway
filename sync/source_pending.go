@@ -11,8 +11,14 @@ import (
 
 // pending per subscription
 type SourcePendingWindow struct {
-	// min Acknowledge From (inclusive) and max Pending To (inclusive)
+	// minimum acknowledged From (inclusive) and maximum pending To (inclusive)
 	Extrema RangeInclusive[SourceSequence]
+
+	// minimum acknowledge sequence. Must always be lower or equal to PendingExtrema.From
+	AcknowledgedSequence SourceSequence
+
+	// pending sequence From (buffered) and To (dispatched)
+	PendingExtrema RangeInclusive[SourceSequence]
 
 	// pending acks
 	Pending map[SetID]SourcePendingAck
@@ -79,18 +85,19 @@ func (w *SourcePendingWindow) MarkDispatched(pending SourcePendingAck) error {
 	return nil
 }
 
-func (w *SourcePendingWindow) ReceiveAck(received time.Time, ack SourcePendingAck) error {
+// receive ack at the source
+func (w *SourcePendingWindow) ReceiveAck(received time.Time, ack SourcePendingAck) (bool, error) {
 	p, exists := w.Pending[ack.SetID]
 	if !exists {
 		// ack is not pending, ignore
-		return nil
+		return false, nil
 	}
 
 	delete(w.Pending, ack.SetID)
 
 	w.LastActivity = maxTime(w.LastActivity, received)
 
-	if ack.IsNAK {
+	if ack.IsNegative {
 		from := ack.SequenceRange.From
 		w.Extrema = RangeInclusive[SourceSequence]{From: from, To: from}
 		pendings, to := w.getConsecutivePendingStartingFrom(from)
@@ -99,7 +106,7 @@ func (w *SourcePendingWindow) ReceiveAck(received time.Time, ack SourcePendingAc
 		w.Extrema.To = to
 		w.Acknowledged = nil
 
-		return nil
+		return true, nil
 
 	} else {
 		w.PendingRetries = 0
@@ -113,7 +120,7 @@ func (w *SourcePendingWindow) ReceiveAck(received time.Time, ack SourcePendingAc
 			}
 		}
 
-		return nil
+		return true, nil
 	}
 }
 
@@ -151,7 +158,7 @@ func (w *SourcePendingWindow) ShouldSentHeartbeat(now time.Time, heartbeatInterv
 
 type SourcePendingAck struct {
 	SetID         SetID
-	IsNAK         bool
+	IsNegative    bool
 	SentTimestamp time.Time
 	SequenceRange RangeInclusive[SourceSequence]
 	Messages      []*v1.Msg
