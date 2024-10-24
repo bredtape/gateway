@@ -15,6 +15,13 @@ func (r RangeInclusive[T]) String() string {
 	return fmt.Sprintf("[%v, %v]", r.From, r.To)
 }
 
+func (r RangeInclusive[T]) Validate() error {
+	if r.From > r.To {
+		return fmt.Errorf("invalid range %v", r)
+	}
+	return nil
+}
+
 // whether the 'lhs' contains the 'rhs' range
 func (lhs RangeInclusive[T]) Contains(rhs RangeInclusive[T]) bool {
 	if lhs.From > rhs.From {
@@ -30,11 +37,11 @@ func (lhs RangeInclusive[T]) Contains(rhs RangeInclusive[T]) bool {
 
 // whether the 'lhs' contains the value
 func (lhs RangeInclusive[T]) ContainsValue(value T) bool {
-	if lhs.From < value {
+	if value < lhs.From {
 		return false
 	}
 
-	if lhs.To > value {
+	if value > lhs.To {
 		return false
 	}
 

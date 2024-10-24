@@ -1,6 +1,7 @@
 package sync
 
 import (
+	"fmt"
 	"slices"
 	"time"
 
@@ -11,11 +12,8 @@ import (
 
 // pending per subscription
 type SourcePendingWindow struct {
-	// minimum acknowledged From (inclusive) and maximum pending To (inclusive)
-	Extrema RangeInclusive[SourceSequence]
-
 	// minimum acknowledge sequence. Must always be lower or equal to PendingExtrema.From
-	AcknowledgedSequence SourceSequence
+	MinAck SourceSequence
 
 	// pending sequence From (buffered) and To (dispatched)
 	PendingExtrema RangeInclusive[SourceSequence]
@@ -36,50 +34,61 @@ type SourcePendingWindow struct {
 	LastActivity time.Time
 }
 
+func (w *SourcePendingWindow) validOrPanic() {
+	if w == nil {
+		return
+	}
+
+	if w.MinAck > w.PendingExtrema.From {
+		panic(fmt.Sprintf("invalid pending window, min ack %d is greater than pending extrema from %d", w.MinAck, w.PendingExtrema.From))
+	}
+
+	if ve := w.PendingExtrema.Validate(); ve != nil {
+		panic(fmt.Sprintf("invalid pending extrema %s", w.PendingExtrema))
+	}
+}
+
 // mark batch dispatched.
 // If the source sequence From is 0, it is assumed the subscription has been restarted, and
 // all pending acks will be removed.
 // Otherwise, the pending sequence must start at Extrema.To
 func (w *SourcePendingWindow) MarkDispatched(pending SourcePendingAck) error {
-	if w.Extrema.From > pending.SequenceRange.From {
-		return errors.New("sequence range mismatch")
-	}
+	defer w.validOrPanic()
 
-	if pending.SequenceRange.From == 0 {
-		w.Pending = make(map[SetID]SourcePendingAck)
-		w.Acknowledged = nil
-	}
+	_, isRetransmit := w.Pending[pending.SetID]
 
-	if w.Extrema.To != pending.SequenceRange.From {
+	if !isRetransmit && w.PendingExtrema.From != pending.SequenceRange.From {
 		return errors.Wrapf(ErrSourceSequenceBroken, "dispatch pending ack From %d must be a continuation of the pending window %s",
-			pending.SequenceRange.From, w.Extrema.String())
+			pending.SequenceRange.From, w.PendingExtrema.String())
 	}
 
-	if w.Extrema.From > pending.SequenceRange.From {
+	if w.MinAck > pending.SequenceRange.From {
 		return errors.Wrapf(ErrSourceSequenceBroken,
-			"pending ack sequence %s comes before pending window %s",
-			pending.SequenceRange.String(), w.Extrema.String())
+			"pending ack sequence %s comes before min. acknowledged sequence %d",
+			pending.SequenceRange.String(), w.MinAck)
 	}
 
-	if !w.Extrema.Overlaps(pending.SequenceRange) {
+	r := RangeInclusive[SourceSequence]{From: w.MinAck, To: w.PendingExtrema.To}
+	if !r.Overlaps(pending.SequenceRange) {
 		return errors.Wrapf(ErrSourceSequenceBroken,
-			"pending sequence %s have gaps with pending window %s",
-			pending.SequenceRange.String(), w.Extrema.String())
+			"pending sequence %s does not overlap range from acknowledged %d to pendingExtrema.To %d",
+			pending.SequenceRange.String(), r.From, r.To)
 	}
 
 	// only checks before this point
 
-	if w.Pending == nil {
+	if w.Pending == nil || pending.SequenceRange.From == 0 {
 		w.Pending = make(map[SetID]SourcePendingAck)
+		w.Acknowledged = nil
 	}
 
 	// this is a retransmit, increment retries
-	if _, exists := w.Pending[pending.SetID]; exists {
+	if isRetransmit {
 		w.PendingRetries++
 	}
 
 	w.Pending[pending.SetID] = pending
-	w.Extrema = w.Extrema.MaxTo(pending.SequenceRange)
+	w.PendingExtrema.From = pending.SequenceRange.To
 	w.LastActivity = maxTime(w.LastActivity, pending.SentTimestamp)
 
 	return nil
@@ -99,11 +108,12 @@ func (w *SourcePendingWindow) ReceiveAck(received time.Time, ack SourcePendingAc
 
 	if ack.IsNegative {
 		from := ack.SequenceRange.From
-		w.Extrema = RangeInclusive[SourceSequence]{From: from, To: from}
+		w.MinAck = from
+		w.PendingExtrema = RangeInclusive[SourceSequence]{From: from, To: from}
 		pendings, to := w.getConsecutivePendingStartingFrom(from)
 
 		w.Pending = pendings
-		w.Extrema.To = to
+		w.PendingExtrema.To = to
 		w.Acknowledged = nil
 
 		return true, nil
@@ -114,9 +124,9 @@ func (w *SourcePendingWindow) ReceiveAck(received time.Time, ack SourcePendingAc
 		slices.SortFunc(w.Acknowledged, cmpPendingAckSequence)
 
 		for i, ack := range w.Acknowledged {
-			if ack.SequenceRange.From == w.Extrema.From {
+			if ack.SequenceRange.From == w.MinAck {
 				w.Acknowledged = slices.Delete(w.Acknowledged, i, i+1)
-				w.Extrema.From = ack.SequenceRange.To
+				w.MinAck = ack.SequenceRange.To
 			}
 		}
 

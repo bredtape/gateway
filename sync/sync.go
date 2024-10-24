@@ -703,7 +703,7 @@ func getMsgsRange(m *v1.Msgs) RangeInclusive[SourceSequence] {
 func msgIncludeFromSequence(minimum SourceSequence, xs []*v1.Msg) []*v1.Msg {
 	// TODO: Optimize search for minimum
 	for i, x := range xs {
-		if SourceSequence(x.GetSequence()) >= minimum {
+		if SourceSequence(x.GetSequence()) > minimum {
 			return xs[i:]
 		}
 	}

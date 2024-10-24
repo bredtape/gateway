@@ -94,8 +94,9 @@ func (s *state) SinkCommit(msgs *v1.Msgs) error {
 
 		} else {
 			// sequence must continue from last committed
-			if seq.From != w.CommittedExtrema.To {
-				return errors.Wrap(ErrSourceSequenceBroken, "sequence must continue from last committed")
+			if !seq.ContainsValue(w.CommittedExtrema.To) {
+				return errors.Wrapf(ErrSourceSequenceBroken, "sequence range %s must continue from last committed %d",
+					seq, w.CommittedExtrema.To)
 			}
 		}
 

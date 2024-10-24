@@ -127,7 +127,8 @@ func newState(from, to gateway.Deployment, cs CommunicationSettings,
 
 	for sub, seq := range initialSourceSequences {
 		s.sourceAckWindows[sub] = &SourcePendingWindow{
-			Extrema: RangeInclusive[SourceSequence]{From: seq, To: seq}}
+			MinAck:         seq,
+			PendingExtrema: RangeInclusive[SourceSequence]{From: seq, To: seq}}
 	}
 
 	return s, s.Validate()
@@ -163,9 +164,9 @@ func (s *state) RegisterStartSync(req *v1.StartSyncRequest) error {
 
 		// check if a initial pending ack window exists
 		if w, exists := s.sourceAckWindows[sub.SourceSubscriptionKey]; exists {
-			if w.Extrema.From > 0 {
+			if w.MinAck > 0 {
 				sub.DeliverPolicy = jetstream.DeliverByStartSequencePolicy
-				sub.OptStartSeq = w.Extrema.From
+				sub.OptStartSeq = w.MinAck
 			}
 		}
 		return nil
@@ -237,6 +238,7 @@ func (s *state) CreateMessageBatch(now time.Time) (*v1.MessageBatch, error) {
 
 	remainingPayloadCapacity := s.cs.MaxAccumulatedPayloadSizeBytes
 	for key, w := range s.sourceAckWindows {
+		// retransmit messages
 		ids := w.GetRetransmit(now, s.cs.AckTimeoutPrSubscription, s.cs.AckRetryPrSubscription)
 		xs := s.repackMessages(key, ids)
 
@@ -258,12 +260,13 @@ func (s *state) CreateMessageBatch(now time.Time) (*v1.MessageBatch, error) {
 			panic("no subscription")
 		}
 
+		// heartbeat message
 		m.ListOfMessages = append(m.ListOfMessages, &v1.Msgs{
 			SetId:            NewSetID().String(),
 			SourceDeployment: s.from.String(),
 			SinkDeployment:   s.to.String(),
 			SourceStreamName: key.SourceStreamName,
-			LastSequence:     uint64(w.Extrema.To),
+			LastSequence:     uint64(w.PendingExtrema.To),
 			ConsumerConfig:   fromSourceSubscription(sub)})
 	}
 

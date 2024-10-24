@@ -751,7 +751,7 @@ func TestStateSourceAckTimeout(t *testing.T) {
 				msg1 := &v1.Msg{
 					Subject:  "x.y.z",
 					Data:     []byte("123"),
-					Sequence: 1}
+					Sequence: 3}
 
 				_, err := s.SourceDeliverFromLocal(key, 0, msg1)
 				So(err, ShouldBeNil)
@@ -760,6 +760,15 @@ func TestStateSourceAckTimeout(t *testing.T) {
 					t0 := time.Now()
 					b1, err := s.CreateMessageBatch(t0)
 					So(err, ShouldBeNil)
+					So(b1.ListOfMessages, ShouldHaveLength, 1)
+					m1 := b1.ListOfMessages[0]
+
+					Convey("with 1 message", func() {
+						So(m1.Messages, ShouldHaveLength, 1)
+					})
+					Convey("with last sequence", func() {
+						So(m1.GetLastSequence(), ShouldEqual, 0)
+					})
 
 					report := s.MarkDispatched(b1)
 					So(report.IsEmpty(), ShouldBeTrue)
@@ -771,13 +780,14 @@ func TestStateSourceAckTimeout(t *testing.T) {
 							So(s.PendingStats(t1), ShouldResemble, []int{1, 0})
 						})
 
-						Convey("create batch#2", func() {
+						Convey("create batch#2 (to retransmit)", func() {
 							b2, err := s.CreateMessageBatch(t1)
 							So(err, ShouldBeNil)
 
+							So(s.sourceAckWindows[key].PendingExtrema.From, ShouldEqual, 3)
+
 							Convey("should have 1 Msgs to send", func() {
 								So(b2.GetListOfMessages(), ShouldHaveLength, 1)
-								m1 := b1.ListOfMessages[0]
 								m2 := b2.ListOfMessages[0]
 
 								Convey("containing 1 message", func() {
@@ -786,8 +796,8 @@ func TestStateSourceAckTimeout(t *testing.T) {
 								Convey("with same set ID", func() {
 									So(m2.SetId, ShouldEqual, m1.SetId)
 								})
-								Convey("with same last sequence", func() {
-									So(m2.LastSequence, ShouldEqual, m1.LastSequence)
+								Convey("with last sequence (matching last msg sequence)", func() {
+									So(m2.LastSequence, ShouldEqual, 0)
 								})
 							})
 
@@ -811,6 +821,15 @@ func TestStateSourceAckTimeout(t *testing.T) {
 
 									Convey("should have NO message to send", func() {
 										So(s.PendingStats(t2), ShouldResemble, []int{0, 0})
+									})
+
+									Convey("create batch#3", func() {
+										b3, err := s.CreateMessageBatch(t2)
+										So(err, ShouldBeNil)
+
+										Convey("should have 0 Msgs to send", func() {
+											So(b3.GetListOfMessages(), ShouldHaveLength, 0)
+										})
 									})
 								})
 							})

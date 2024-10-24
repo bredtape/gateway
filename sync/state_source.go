@@ -28,11 +28,11 @@ func (s *state) GetSourceLocalSubscription(key SourceSubscriptionKey) (SourceSub
 
 	w := s.sourceAckWindows[key]
 
-	if w != nil && w.Extrema.To > 0 {
+	if w != nil && w.PendingExtrema.To > 0 {
 		return SourceSubscription{
 			SourceSubscriptionKey: key,
 			DeliverPolicy:         jetstream.DeliverByStartSequencePolicy,
-			OptStartSeq:           w.Extrema.To,
+			OptStartSeq:           w.PendingExtrema.To,
 			FilterSubjects:        sub.FilterSubjects}, true
 	}
 
@@ -83,8 +83,9 @@ func (s *state) SourceDeliverFromLocal(key SourceSubscriptionKey, lastSequence S
 			}
 		}
 
-		if w.Extrema.To != lastSequence {
-			return 0, errors.Wrapf(ErrSourceSequenceBroken, "pending window %s does not match last sequence %d", w.Extrema.String(), lastSequence)
+		if w.PendingExtrema.To != lastSequence {
+			return 0, errors.Wrapf(ErrSourceSequenceBroken, "last sequence %d, does not match pending window %s (min ack %d)",
+				lastSequence, w.PendingExtrema, w.MinAck)
 		}
 	}
 
@@ -101,8 +102,10 @@ func (s *state) SourceDeliverFromLocal(key SourceSubscriptionKey, lastSequence S
 			}
 		} else {
 			if w, exists := s.sourceAckWindows[key]; exists {
-				if w.Extrema.To != lastSequence {
-					return 0, errors.Wrapf(ErrSourceSequenceBroken, "pending window extrema %s does not match last sequence %d", w.Extrema.String(), lastSequence)
+				if w.PendingExtrema.To != lastSequence {
+					return 0, errors.Wrapf(ErrSourceSequenceBroken,
+						"last sequence %d does not match pending window %s (min ack %d)",
+						lastSequence, w.PendingExtrema.String(), w.MinAck)
 				}
 			}
 		}
@@ -132,12 +135,14 @@ func (s *state) SourceDeliverFromLocal(key SourceSubscriptionKey, lastSequence S
 	if lastSequence == 0 {
 		w.Pending = nil
 		w.Acknowledged = nil
-		w.Extrema.From = 0
+		w.MinAck = 0
+		w.PendingExtrema.From = 0
+		w.PendingExtrema.To = 0
 	}
 
-	// if acceptCount > 0 {
-	// 	w.Extrema.To = SourceSequence(messages[acceptCount-1].GetSequence())
-	// }
+	if acceptCount > 0 {
+		w.PendingExtrema.To = SourceSequence(messages[acceptCount-1].GetSequence())
+	}
 
 	// prune existing messages if subscription was restarted
 	if s.sourceOutgoing == nil || lastSequence == 0 {
@@ -172,16 +177,16 @@ func (s *state) packMessages(payloadCapacity int, key SourceSubscriptionKey) []*
 		ConsumerConfig:   fromSourceSubscription(sub),
 		Messages:         make([]*v1.Msg, 0, min(len(messages), payloadCapacity))}
 
+	if w, exists := s.sourceAckWindows[key]; exists {
+		b.LastSequence = uint64(w.PendingExtrema.From)
+	}
+
 	for _, m := range messages {
 		payloadCapacity -= len(m.Data)
 		if payloadCapacity < 0 {
 			break
 		}
 		b.Messages = append(b.Messages, m)
-	}
-
-	if w, exists := s.sourceAckWindows[key]; exists {
-		b.LastSequence = uint64(w.Extrema.To)
 	}
 
 	if len(b.Messages) == 0 {
@@ -252,12 +257,12 @@ func (s *state) SourceHandleSinkAck(currentTime, sentTime time.Time, ack *v1.Ack
 	}
 
 	// if nak, delete pending messages
-	if p.IsNegative {
-		// keep messages from Extrema.To, if found
-		if w.Extrema.To > 0 {
-			keepers := keepMessagesFrom(s.sourceOutgoing[key], uint64(w.Extrema.To))
+	if wasPending && p.IsNegative {
+		// keep messages from Extrema.From, if found
+		if w.PendingExtrema.From > 0 {
+			keepers := keepMessagesFrom(s.sourceOutgoing[key], uint64(w.PendingExtrema.From))
 			if len(keepers) > 0 {
-				w.Extrema.To = SourceSequence(keepers[len(keepers)-1].GetSequence())
+				w.PendingExtrema.To = SourceSequence(keepers[len(keepers)-1].GetSequence())
 			}
 			s.sourceOutgoing[key] = keepers
 		} else {
