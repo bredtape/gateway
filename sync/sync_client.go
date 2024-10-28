@@ -59,9 +59,9 @@ func (client *NatsSyncClient) publishStartSyncRequest(ctx context.Context, req *
 	return client.js.PublishProto(ctx, subject, nil, req, jetstream.WithExpectStream(client.syncStream))
 }
 
-func (client *NatsSyncClient) publishStopSyncRequest(ctx context.Context, req *v1.StopSyncRequest) (*jetstream.PubAck, error) {
-	subject := fmt.Sprintf("%s.%s.%s.%s", client.syncStream,
-		req.SinkDeployment, req.SourceDeployment, req.SourceStreamName)
+// func (client *NatsSyncClient) publishStopSyncRequest(ctx context.Context, req *v1.StopSyncRequest) (*jetstream.PubAck, error) {
+// 	subject := fmt.Sprintf("%s.%s.%s.%s", client.syncStream,
+// 		req.SinkDeployment, req.SourceDeployment, req.SourceStreamName)
 
-	return client.js.PublishProto(ctx, subject, nil, req, jetstream.WithExpectStream(client.syncStream))
-}
+// 	return client.js.PublishProto(ctx, subject, nil, req, jetstream.WithExpectStream(client.syncStream))
+// }

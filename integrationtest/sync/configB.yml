@@ -9,17 +9,17 @@ deploymentSettings:
       outgoingDir: /data/out
 
 defaultSettings:
-  ackTimeout: 2s
+  ackTimeout: 5s
   ackRetryJitter: 0.2
-  ackRetryStep: 1s
+  ackRetryStep: 5s
   ackRetryMax: 60s
-  heartbeatInterval: 20s
-  pendingAcksMax: 1000
-  pendingIncomingMessagesMaxBuffered: 5000
-  pendingIncomingMessagesDeleteThreshold: 1000
+  heartbeatInterval: 60s
+  pendingAcksMax: 10
+  pendingIncomingMessagesDeleteThreshold: 40
+  pendingIncomingMessagesMaxBuffered: 100
   maxAccumulatedPayloadSize: 4_194_304 # 4MB
   natsOperationTimeout: 5s
-  batchFlushTimeout: 1s
+  batchFlushTimeout: 0.2s
   exchangeOperationTimeout: 5s
   fileExchangeConfig:
     pollingStartDelay: 0s

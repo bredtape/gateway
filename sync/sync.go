@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -18,6 +19,19 @@ import (
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
+
+/*
+Refactor and test JSConn.StartSubscribeOrderered. Do not support last pr subject policy.
+	Only exit when ctx is done, other errors must be logged and retried. Do not relay duplicates.
+	Should survive nats restarts and missing streams etc. No panics
+
+	Re-subscribing in *natsSync should have backoff.
+
+	refactor to have 'sync' subscriptions on a separate channel, which
+	then can be read at startup until head is reached. Then, other source subscriptions
+	may be started and exchange read/write may commence.
+
+*/
 
 const (
 	// subscription stream name placeholder used in published messages.
@@ -109,7 +123,8 @@ func StartNatsSync(ctx context.Context, js *JSConn, config NatsSyncConfig) error
 			exchange:            config.Exchanges[d],
 			js:                  js,
 			sinkLastSequence:    make(map[SinkSubscriptionKey]SourceSinkSequence),
-			sourceSubscriptions: make(map[SourceSubscriptionKey]func())}
+			sourceSubscriptions: make(map[SourceSubscriptionKey]func()),
+			cancelEvent:         make(chan SourceSubscriptionKey)}
 		go ns.outerLoop(ctx)
 	}
 
@@ -129,6 +144,9 @@ type natsSync struct {
 
 	// active source subscriptions with handle to cancel it
 	sourceSubscriptions map[SourceSubscriptionKey]func()
+
+	// channel to signal that a source subscription has been cancelled
+	cancelEvent chan SourceSubscriptionKey
 }
 
 func (ns *natsSync) outerLoop(ctx context.Context) {
@@ -175,7 +193,7 @@ func (ns *natsSync) loop(ctx context.Context, log *slog.Logger) error {
 	}
 	log.Debug("got last sequence for sync stream", "sequence", syncHeadSequence)
 
-	realIncomingCh, err := ns.exchange.StartReceiving(ctx)
+	realExchangeIncomingCh, err := ns.exchange.StartReceiving(ctx)
 	if err != nil {
 		return errors.Wrap(err, "failed to start receiving for deployment")
 	}
@@ -184,28 +202,49 @@ func (ns *natsSync) loop(ctx context.Context, log *slog.Logger) error {
 	exchangeIncomingCh := make(<-chan *v1.MessageBatch)
 	reachedSyncHead := false
 	flushTimerActive := false
-	flushTimer := make(<-chan time.Time) // disabled
-	sourceMessagesCh := make(chan sourcePublishedMessage)
+	flushTimer := make(<-chan time.Time)            // disabled
+	syncSource := make(chan sourcePublishedMessage) // channel with sync messages
+	realSourceMessagesCh := make(chan sourcePublishedMessage)
+	disabledSourceMessagesCh := make(chan sourcePublishedMessage)
+	// messages read from sourceMessagesCh but cannot be delivered due to backoff
+	var sourceMessagesNotDelivered []sourcePublishedMessage
 
 	for {
 		if reachedSyncHead {
-			if ns.state.HasSubscriptions() {
-				exchangeIncomingCh = realIncomingCh
-			} else {
-				log.Info("no subscriptions, waiting for sync requests")
-			}
+			exchangeIncomingCh = realExchangeIncomingCh
+		} else {
+			log.Debug("waiting for all existing sync requests to be read")
 		}
 
 		ns.sinkProcessIncoming(ctx, log)
-		ns.sourceStartSubscriptions(ctx, log, sourceMessagesCh)
+		ns.sourceStartSubscriptions(ctx, log, syncSource, realSourceMessagesCh)
 
 		// if pending messages/acks, start timer for flush, if not already started.
-		if !flushTimerActive {
+		if !flushTimerActive && reachedSyncHead {
 			stats := ns.state.PendingStats(time.Now())
-			if stats[0] > 0 || stats[1] > 0 {
+			if slices.ContainsFunc(stats, func(x int) bool {
+				return x > 0
+			}) {
 				flushTimerActive = true
 				flushTimer = time.After(ns.cs.BatchFlushTimeout)
+				log.Log(ctx, slog.LevelDebug-3, "started flush timer because of pending", "stats", stats)
 			}
+		}
+
+		// try to deliver messages that were not delivered due to backoff. There should only be 0..1
+		if reachedSyncHead && len(sourceMessagesNotDelivered) > 0 {
+			msg := sourceMessagesNotDelivered[0]
+			log2 := log.With("sourceSubscriptionKey", msg.SourceSubscriptionKey,
+				"lastSequence", msg.LastSequence,
+				"count", len(msg.Messages))
+			if ns.sourceDeliverFromLocal(ctx, log2, msg) {
+				sourceMessagesNotDelivered = sourceMessagesNotDelivered[1:]
+			}
+		}
+
+		sourceMessagesCh := realSourceMessagesCh
+		if len(sourceMessagesNotDelivered) > 0 {
+			sourceMessagesCh = disabledSourceMessagesCh
 		}
 
 		select {
@@ -227,10 +266,16 @@ func (ns *natsSync) loop(ctx context.Context, log *slog.Logger) error {
 		*/
 
 		case <-ctx.Done():
+
+		case <-ns.cancelEvent:
+			// nop (just to trigger sourceStartSubscriptions)
+
 		// if pending messages/acks and flush timer have fired,
 		// then write outgoing batch via Exchange
 		case <-flushTimer:
 			flushTimerActive = false
+			flushTimer = make(<-chan time.Time) // disabled
+
 			batch, err := ns.state.CreateMessageBatch(time.Now())
 			if err != nil {
 				log.Error("failed to create message batch", "err", err)
@@ -243,6 +288,11 @@ func (ns *natsSync) loop(ctx context.Context, log *slog.Logger) error {
 				log.Error("failed to write message batch. Ignoring", "err", err)
 			} else {
 				log.Log(ctx, slog.LevelDebug-3, "wrote message batch")
+
+				report := ns.state.MarkDispatched(batch)
+				if !report.IsEmpty() {
+					log.Debug("mark dispatched failed", "report", report)
+				}
 			}
 
 		// incoming messages from exchange
@@ -252,7 +302,7 @@ func (ns *natsSync) loop(ctx context.Context, log *slog.Logger) error {
 			}
 
 			if !ns.matchesThisDeployment(msg) {
-				log.Debug("ignoring batch, not matching this deployment",
+				log.Warn("ignoring batch, not matching this deployment",
 					"batchFrom", msg.GetFromDeployment(), "batchTo", msg.GetToDeployment())
 				continue
 			}
@@ -278,29 +328,55 @@ func (ns *natsSync) loop(ctx context.Context, log *slog.Logger) error {
 			}
 
 			if msg.SourceSubscriptionKey == syncSubKey {
-				ns.handleSyncMessage(log2, msg)
-
-				if msg.LastSequence >= SourceSequence(syncHeadSequence) {
-					reachedSyncHead = true
-					log.Debug("reached sync head", "lastSequence", msg.LastSequence)
-				}
-
-				continue
+				slogging.Fatal(log2, "unexpected source subscription key")
 			}
 
-			count, err := ns.state.SourceDeliverFromLocal(msg.SourceSubscriptionKey, msg.LastSequence, msg.Messages...)
-			if err != nil {
-				log2.Debug("failed to deliver message", "err", err,
-					"operation", "state/SourceDeliverFromLocal")
-				if errors.Is(err, ErrSourceSequenceBroken) {
-					log2.Debug("cancelling subscription")
-					ns.sourceCancelSubscription(log2, msg.SourceSubscriptionKey)
-				}
-			} else {
-				log2.Debug("delivered message", "acceptedCount", count)
+			if !ns.sourceDeliverFromLocal(ctx, log2, msg) {
+				sourceMessagesNotDelivered = append(sourceMessagesNotDelivered, msg)
+			}
+
+		case msg, ok := <-syncSource:
+			if !ok {
+				return errors.New("sync source channel closed")
+			}
+
+			log2 := log.With("sourceSubscriptionKey", msg.SourceSubscriptionKey,
+				"lastSequence", msg.LastSequence,
+				"count", len(msg.Messages))
+
+			if msg.SourceSubscriptionKey != syncSubKey {
+				slogging.Fatal(log2, "unexpected source subscription key")
+			}
+
+			ns.handleSyncMessage(log2, msg)
+
+			if !reachedSyncHead && msg.LastSequence >= SourceSequence(syncHeadSequence) {
+				reachedSyncHead = true
+				log.Debug("reached sync head")
 			}
 		}
 	}
+}
+
+// source, deliver messages from local state. Returns true if processed, false if backoff
+func (ns *natsSync) sourceDeliverFromLocal(ctx context.Context, log2 *slog.Logger, msg sourcePublishedMessage) bool {
+	count, err := ns.state.SourceDeliverFromLocal(msg.SourceSubscriptionKey, msg.LastSequence, msg.Messages...)
+	if err != nil {
+		log2.Log(ctx, slog.LevelDebug-3, "failed to deliver message", "err", err,
+			"operation", "state/SourceDeliverFromLocal",
+			"lastSequence", msg.LastSequence, "count", len(msg.Messages))
+		if errors.Is(err, ErrSourceSequenceBroken) {
+			log2.Debug("cancelling subscription")
+			ns.sourceCancelSubscription(log2, msg.SourceSubscriptionKey)
+		} else if errors.Is(err, ErrBackoff) {
+			return false
+		}
+	} else {
+		log2.Log(ctx, slog.LevelDebug-3, "delivered message(s)", "acceptedCount", count,
+			"operation", "state/SourceDeliverFromLocal")
+	}
+
+	return true
 }
 
 // source, cancel subscription
@@ -309,10 +385,13 @@ func (ns *natsSync) sourceCancelSubscription(log *slog.Logger, key SourceSubscri
 		cancel()
 		delete(ns.sourceSubscriptions, key)
 		log.Debug("cancelled subscription", "sourceSubscriptionKey", key)
+		go func() {
+			ns.cancelEvent <- key
+		}()
 	}
 }
 
-func (ns *natsSync) sourceStartSubscriptions(ctx context.Context, log *slog.Logger, incoming chan<- sourcePublishedMessage) {
+func (ns *natsSync) sourceStartSubscriptions(ctx context.Context, log *slog.Logger, syncSource, incoming chan<- sourcePublishedMessage) {
 	actives := getMapKeys(ns.sourceSubscriptions)
 	requested := set.NewValues(ns.state.GetSourceLocalSubscriptionKeys()...)
 
@@ -329,17 +408,19 @@ func (ns *natsSync) sourceStartSubscriptions(ctx context.Context, log *slog.Logg
 		}
 
 		subCtx, cancel := context.WithCancel(ctx)
-		err := ns.sourceStartSubscription(subCtx, incoming, ns.cs.HeartbeatIntervalPrSubscription, sub)
-		if err != nil {
-			cancel()
-			log.Error("failed to start subscription", "err", err, "sourceStreamName", sub.SourceStreamName)
-			continue
+		if sub.SourceStreamName == ns.syncStream {
+			ns.sourceStartSubscription(subCtx, syncSource, ns.cs.HeartbeatIntervalPrSubscription, sub)
+			log.Debug("started sync subscription",
+				"sourceStreamName", sub.SourceStreamName,
+				"deliverPolicy", sub.DeliverPolicy,
+				"optStartSeq", sub.OptStartSeq)
+		} else {
+			ns.sourceStartSubscription(subCtx, incoming, ns.cs.HeartbeatIntervalPrSubscription, sub)
+			log.Debug("started subscription",
+				"sourceStreamName", sub.SourceStreamName,
+				"deliverPolicy", sub.DeliverPolicy,
+				"optStartSeq", sub.OptStartSeq)
 		}
-
-		log.Debug("started subscription",
-			"sourceStreamName", sub.SourceStreamName,
-			"deliverPolicy", sub.DeliverPolicy,
-			"optStartSeq", sub.OptStartSeq)
 		ns.sourceSubscriptions[key] = cancel
 	}
 }
@@ -353,8 +434,13 @@ type sourcePublishedMessage struct {
 	Messages     []*v1.Msg
 }
 
-func (ns *natsSync) sourceStartSubscription(ctx context.Context, incoming chan<- sourcePublishedMessage, heartbeatInterval time.Duration, sub SourceSubscription) error {
-	log := slog.With("operation", "sourceStartSubscription", "sourceStreamName", sub.SourceStreamName)
+// start subscription to source stream.
+// Will stop if ctx expires.
+// On error the subscription is stopped, and a message is published to the 'incoming' channel with the error
+func (ns *natsSync) sourceStartSubscription(ctx context.Context, incoming chan<- sourcePublishedMessage, heartbeatInterval time.Duration, sub SourceSubscription) {
+	log := slog.With("operation", "sourceStartSubscription",
+		"sourceStreamName", sub.SourceStreamName,
+		"deliverPolicy", sub.DeliverPolicy)
 	cfg := jetstream.OrderedConsumerConfig{
 		DeliverPolicy:  sub.DeliverPolicy,
 		OptStartSeq:    uint64(sub.OptStartSeq),
@@ -364,16 +450,18 @@ func (ns *natsSync) sourceStartSubscription(ctx context.Context, incoming chan<-
 	lastSequence := SourceSequence(0)
 	if sub.DeliverPolicy == jetstream.DeliverByStartSequencePolicy {
 		lastSequence = SourceSequence(sub.OptStartSeq)
-	}
-
-	ch, err := ns.js.SubscribeOrderered(ctx, sub.SourceStreamName, cfg)
-	if err != nil {
-		return errors.Wrap(err, "failed to subscribe to stream")
+		log.Debug("starting subscription with start sequence", "sequence", lastSequence)
+	} else {
+		log.Debug("starting subscription")
 	}
 
 	go func() {
+		defer log.Debug("subscription was closed")
 		heartbeatTimer := time.After(heartbeatInterval)
 		lastActivity := time.Time{}
+		lastSequenceRelayed := SourceSequence(0)
+
+		ch := ns.js.StartSubscribeOrderered2(ctx, sub.SourceStreamName, cfg)
 
 		for {
 			select {
@@ -381,28 +469,28 @@ func (ns *natsSync) sourceStartSubscription(ctx context.Context, incoming chan<-
 				return
 			case msg, ok := <-ch:
 				if !ok {
+					// publish error and quit
+					m := sourcePublishedMessage{
+						SourceSubscriptionKey: sub.SourceSubscriptionKey,
+						Error:                 errors.New("underlying subscription channel closed")}
+					relayMessage(ctx, incoming, m)
 					return
 				}
 
 				m := sourcePublishedMessage{
 					SourceSubscriptionKey: sub.SourceSubscriptionKey,
-					Error:                 msg.Error,
-					LastSequence:          lastSequence}
+					LastSequence:          lastSequence,
+					Messages:              []*v1.Msg{publishedMessageToV1(msg)}}
 
-				if msg.Error == nil {
-					m.Messages = []*v1.Msg{publishedMessageToV1(msg.Item)}
-				}
-
-				log2 := log.With("lastSequence", lastSequence, "sequence", msg.Item.Sequence)
-				log2.Log(ctx, slog.LevelDebug-3, "have message to sent")
-				select {
-				case <-ctx.Done():
+				log2 := log.With("lastSequence", lastSequence, "sequence", msg.Sequence)
+				log2.Log(ctx, slog.LevelDebug-3, "have message to send")
+				if !relayMessage(ctx, incoming, m) {
 					return
-				case incoming <- m:
-					log2.Log(ctx, slog.LevelDebug-3, "message was relayed")
 				}
+				log2.Log(ctx, slog.LevelDebug-3, "message was sent")
 
-				lastSequence = SourceSequence(msg.Item.Sequence)
+				lastSequence = SourceSequence(msg.Sequence)
+				lastSequenceRelayed = lastSequence
 				lastActivity = time.Now()
 
 			case <-heartbeatTimer:
@@ -412,23 +500,37 @@ func (ns *natsSync) sourceStartSubscription(ctx context.Context, incoming chan<-
 					continue
 				}
 
+				heartbeatTimer = time.After(heartbeatInterval)
+
+				if lastSequenceRelayed == 0 {
+					continue
+				}
+
 				heartbeatMsg := sourcePublishedMessage{
 					SourceSubscriptionKey: sub.SourceSubscriptionKey,
-					LastSequence:          lastSequence}
+					LastSequence:          lastSequenceRelayed}
 
-				log.Log(ctx, slog.LevelDebug-3, "have heartbeat to sent", "lastSequence", lastSequence)
-				select {
-				case <-ctx.Done():
+				log.Log(ctx, slog.LevelDebug-3, "have heartbeat to sent", "lastSequenceRelayed", lastSequenceRelayed)
+				if !relayMessage(ctx, incoming, heartbeatMsg) {
 					return
-				case incoming <- heartbeatMsg:
-					log.Log(ctx, slog.LevelDebug-3, "heartbeat was relayed", "lastSequence", lastSequence)
 				}
-				heartbeatTimer = time.After(heartbeatInterval)
+				log.Log(ctx, slog.LevelDebug-3, "heartbeat was relayed", "lastSequenceRelayed", lastSequenceRelayed)
 			}
 		}
 	}()
+}
 
-	return nil
+// try to relay message, unless ctx has expired. Returns true if successful.
+func relayMessage[T any](ctx context.Context, ch chan<- T, item T) bool {
+	if ctx.Err() != nil {
+		return false
+	}
+	select {
+	case <-ctx.Done():
+		return false
+	case ch <- item:
+		return true
+	}
 }
 
 // write buffered incoming messages to nats stream
@@ -501,8 +603,19 @@ func (ns *natsSync) sinkProcessIncoming(ctx context.Context, log *slog.Logger) {
 
 			err = ns.state.SinkCommit(msgs)
 			if err != nil {
-				log2.Debug("failed to commit messages. Ignoring", "err", err)
-				panic("failed to commit messages")
+				// reject
+				if errors.Is(err, ErrSourceSequenceBroken) {
+					err2 := ns.state.SinkCommitReject(msgs, seq.SourceSequence)
+					if err2 != nil {
+						log2.Debug("failed to reject messages. Ignoring", "err", err2)
+					} else {
+						log2.Debug("rejected messages", "err", err)
+					}
+				} else {
+					log2.Debug("failed to commit messages. Ignoring (should self-correct)", "err", err)
+				}
+			} else {
+				log2.Debug("committed messages")
 			}
 		}
 	}
@@ -619,14 +732,6 @@ func (ns *natsSync) handleSyncMessage(parentLog *slog.Logger, spm sourcePublishe
 			log.Warn("unknown message type", "type", msgType[0])
 		}
 	}
-}
-
-func (ns *natsSync) getSyncStreamFilterSubjects() []string {
-	return []string{
-		// source
-		fmt.Sprintf("%s.%s.%s.>", ns.syncStream, ns.from.String(), ns.to.String()),
-		// sink
-		fmt.Sprintf("%s.%s.%s.>", ns.syncStream, ns.to.String(), ns.from.String())}
 }
 
 func (ns *natsSync) publishMsgs(ctx context.Context, lastSequence SourceSinkSequence, stream string, ms []*v1.Msg) (SourceSinkSequence, error) {

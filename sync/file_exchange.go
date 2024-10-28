@@ -238,6 +238,10 @@ func (ex *FileExchange) consumeFile(filename string) (*v1.MessageBatch, error) {
 		return nil, errors.Wrap(err, "failed to delete file")
 	}
 
+	if len(data) == 0 {
+		return nil, nil
+	}
+
 	err = verifyHash(data, filename)
 	if err != nil {
 		return nil, errors.Wrap(err, "failed to verify hash")

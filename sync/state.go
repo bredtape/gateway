@@ -155,7 +155,10 @@ func (s *state) RegisterStartSync(req *v1.StartSyncRequest) error {
 	if isSource {
 		sub := toSourceSubscription(req.GetSourceStreamName(), req.GetConsumerConfig(), req.GetFilterSubjects())
 
-		if _, exists := s.sourceOriginalSubscription[sub.SourceSubscriptionKey]; exists {
+		if subExisting, exists := s.sourceOriginalSubscription[sub.SourceSubscriptionKey]; exists {
+			if sub.Equals(subExisting) {
+				return nil
+			}
 			return errors.New("subscription already exists")
 		}
 
@@ -174,9 +177,6 @@ func (s *state) RegisterStartSync(req *v1.StartSyncRequest) error {
 
 	if isSink {
 		key := SinkSubscriptionKey{SourceStreamName: req.GetSourceStreamName()}
-		if _, exists := s.sinkSubscription[key]; exists {
-			return errors.New("subscription already exists")
-		}
 
 		sub := SinkSubscription{
 			SinkSubscriptionKey: key,
@@ -186,6 +186,13 @@ func (s *state) RegisterStartSync(req *v1.StartSyncRequest) error {
 			FilterSubjects:      req.GetFilterSubjects()}
 		if sub.DeliverPolicy == jetstream.DeliverByStartTimePolicy {
 			sub.OptStartTime = req.GetConsumerConfig().GetOptStartTime().AsTime()
+		}
+
+		if subExisting, exists := s.sinkSubscription[key]; exists {
+			if sub.Equals(subExisting) {
+				return nil
+			}
+			return errors.New("subscription already exists")
 		}
 
 		s.sinkSubscription[key] = sub
@@ -294,27 +301,27 @@ func (s *state) CreateMessageBatch(now time.Time) (*v1.MessageBatch, error) {
 }
 
 // pending stats for 'to' deployment evaluated at 'now'
-// returns [number of messages (including re-transmit), number of pending acks]
+// returns [number of messages, number of retransmits, number of pending acks, number of heartbeats]
 func (s *state) PendingStats(now time.Time) []int {
-	var nm, na int
+	var nm, nr, na, nh int
 
 	for key := range s.sourceOutgoing {
 		nm += len(s.sourceOutgoing[key])
+	}
+
+	for _, w := range s.sourceAckWindows {
+		nr += len(w.GetRetransmit(now, s.cs.AckTimeoutPrSubscription, s.cs.AckRetryPrSubscription))
+
+		if w.ShouldSentHeartbeat(now, s.cs.HeartbeatIntervalPrSubscription) {
+			nh++
+		}
 	}
 
 	for _, w := range s.sinkCommit {
 		na += len(w.PendingAcks)
 	}
 
-	for _, w := range s.sourceAckWindows {
-		nm += len(w.GetRetransmit(now, s.cs.AckTimeoutPrSubscription, s.cs.AckRetryPrSubscription))
-
-		if w.ShouldSentHeartbeat(now, s.cs.HeartbeatIntervalPrSubscription) {
-			nm++
-		}
-	}
-
-	return []int{nm, na}
+	return []int{nm, nr, na, nh}
 }
 
 type DispatchReport struct {

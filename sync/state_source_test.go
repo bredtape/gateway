@@ -240,6 +240,23 @@ func TestStateSourceBasic(t *testing.T) {
 					})
 				})
 			})
+
+			Convey("register same subscription again", func() {
+				err := s.RegisterStartSync(req)
+				Convey("should not have error", func() {
+					So(err, ShouldBeNil)
+				})
+			})
+
+			Convey("with other deliver policy", func() {
+				req.ConsumerConfig.DeliverPolicy = v1.DeliverPolicy_DELIVER_POLICY_BY_START_SEQUENCE
+				Convey("register same subscription again", func() {
+					err := s.RegisterStartSync(req)
+					Convey("should have error", func() {
+						So(err, ShouldNotBeNil)
+					})
+				})
+			})
 		})
 	})
 }
@@ -286,7 +303,7 @@ func TestStateSourceBackpressure(t *testing.T) {
 				So(count, ShouldEqual, 10)
 
 				Convey("should have 10 outgoing messages", func() {
-					So(s.PendingStats(now), ShouldResemble, []int{maxPending, 0})
+					So(s.PendingStats(now), ShouldResemble, []int{maxPending, 0, 0, 0})
 				})
 
 				Convey("deliver 1 more message for stream1", func() {
@@ -304,7 +321,7 @@ func TestStateSourceBackpressure(t *testing.T) {
 						So(count, ShouldEqual, 0)
 					})
 					Convey("should still have 10 outgoing messages", func() {
-						So(s.PendingStats(now), ShouldResemble, []int{maxPending, 0})
+						So(s.PendingStats(now), ShouldResemble, []int{maxPending, 0, 0, 0})
 					})
 				})
 
@@ -315,7 +332,7 @@ func TestStateSourceBackpressure(t *testing.T) {
 					So(count, ShouldEqual, 1)
 
 					Convey("should have 1 outgoing messages", func() {
-						So(s.PendingStats(now), ShouldResemble, []int{1, 0})
+						So(s.PendingStats(now), ShouldResemble, []int{1, 0, 0, 0})
 					})
 				})
 
@@ -327,7 +344,7 @@ func TestStateSourceBackpressure(t *testing.T) {
 					So(report.IsEmpty(), ShouldBeTrue)
 
 					Convey("should have 0 outgoing messages", func() {
-						So(s.PendingStats(now), ShouldResemble, []int{0, 0})
+						So(s.PendingStats(now), ShouldResemble, []int{0, 0, 0, 0})
 					})
 
 					Convey("deliver 1 more message for stream1", func() {
@@ -364,7 +381,7 @@ func TestStateSourceBackpressure(t *testing.T) {
 				So(count, ShouldEqual, 8)
 
 				Convey("should have 8 outgoing messages", func() {
-					So(s.PendingStats(now), ShouldResemble, []int{8, 0})
+					So(s.PendingStats(now), ShouldResemble, []int{8, 0, 0, 0})
 				})
 
 				Convey("deliver 4 messages", func() {
@@ -387,7 +404,7 @@ func TestStateSourceBackpressure(t *testing.T) {
 						So(count, ShouldEqual, 2)
 					})
 					Convey("should have 10 outgoing messages", func() {
-						So(s.PendingStats(now), ShouldResemble, []int{maxPending, 0})
+						So(s.PendingStats(now), ShouldResemble, []int{maxPending, 0, 0, 0})
 					})
 				})
 			})
@@ -641,7 +658,7 @@ func TestStateSourceInit(t *testing.T) {
 									So(err, ShouldBeNil)
 
 									Convey("should have 1 message to send", func() {
-										So(s.PendingStats(now), ShouldResemble, []int{1, 0})
+										So(s.PendingStats(now), ShouldResemble, []int{1, 0, 0, 0})
 									})
 
 									Convey("create batch#3 and send", func() {
@@ -684,7 +701,7 @@ func TestStateSourceInit(t *testing.T) {
 												So(err, ShouldBeNil)
 
 												Convey("should have 1 message to send", func() {
-													So(s.PendingStats(now), ShouldResemble, []int{1, 0})
+													So(s.PendingStats(now), ShouldResemble, []int{1, 0, 0, 0})
 												})
 											})
 										})
@@ -710,7 +727,7 @@ func TestStateSourceInit(t *testing.T) {
 										})
 
 										Convey("should have 1 message to send", func() {
-											So(s.PendingStats(now), ShouldResemble, []int{1, 0})
+											So(s.PendingStats(now), ShouldResemble, []int{1, 0, 0, 0})
 										})
 									})
 								})
@@ -776,8 +793,8 @@ func TestStateSourceAckTimeout(t *testing.T) {
 					Convey("no ack received within timeout (1 sec), should retransmit after 2 sec", func() {
 						t1 := t0.Add(2 * time.Second)
 
-						Convey("should have 1 message to send", func() {
-							So(s.PendingStats(t1), ShouldResemble, []int{1, 0})
+						Convey("should have 1 retransmit to send", func() {
+							So(s.PendingStats(t1), ShouldResemble, []int{0, 1, 0, 0})
 						})
 
 						Convey("create batch#2 (to retransmit)", func() {
@@ -811,8 +828,8 @@ func TestStateSourceAckTimeout(t *testing.T) {
 								Convey("no ack received within timeout (1 sec), should retransmit after 5 sec", func() {
 									t2 := t1.Add(5 * time.Second)
 
-									Convey("should have 1 message to send", func() {
-										So(s.PendingStats(t2), ShouldResemble, []int{1, 0})
+									Convey("should have 1 retransmit to send", func() {
+										So(s.PendingStats(t2), ShouldResemble, []int{0, 1, 0, 0})
 									})
 								})
 
@@ -820,7 +837,7 @@ func TestStateSourceAckTimeout(t *testing.T) {
 									t2 := t1.Add(4 * time.Second)
 
 									Convey("should have NO message to send", func() {
-										So(s.PendingStats(t2), ShouldResemble, []int{0, 0})
+										So(s.PendingStats(t2), ShouldResemble, []int{0, 0, 0, 0})
 									})
 
 									Convey("create batch#3", func() {
@@ -840,7 +857,7 @@ func TestStateSourceAckTimeout(t *testing.T) {
 						t1 := t0.Add(1 * time.Second)
 
 						Convey("should have no messages to send", func() {
-							So(s.PendingStats(t1), ShouldResemble, []int{0, 0})
+							So(s.PendingStats(t1), ShouldResemble, []int{0, 0, 0, 0})
 						})
 
 						Convey("create batch#2", func() {
@@ -928,8 +945,8 @@ func TestStateSourceHeartbeat(t *testing.T) {
 								})
 							})
 
-							Convey("should have 1 message to send", func() {
-								So(s.PendingStats(t2), ShouldResemble, []int{1, 0})
+							Convey("should have 1 heartbeat to send", func() {
+								So(s.PendingStats(t2), ShouldResemble, []int{0, 0, 0, 1})
 							})
 
 							Convey("create batch#2", func() {
@@ -946,7 +963,7 @@ func TestStateSourceHeartbeat(t *testing.T) {
 							t2 := t1.Add(59 * time.Second)
 
 							Convey("should have no messages to send", func() {
-								So(s.PendingStats(t2), ShouldResemble, []int{0, 0})
+								So(s.PendingStats(t2), ShouldResemble, []int{0, 0, 0, 0})
 							})
 
 							Convey("create batch#2", func() {
@@ -964,7 +981,7 @@ func TestStateSourceHeartbeat(t *testing.T) {
 						t2 := t1.Add(1 * time.Minute)
 
 						Convey("should have retransmit (but not heartbeat) to send", func() {
-							So(s.PendingStats(t2), ShouldResemble, []int{1, 0})
+							So(s.PendingStats(t2), ShouldResemble, []int{0, 1, 0, 0})
 
 							Convey("create batch#2", func() {
 								b2, err := s.CreateMessageBatch(t2)
@@ -1036,7 +1053,7 @@ func TestStateSourceMaxPayloadSize(t *testing.T) {
 					So(count, ShouldEqual, 1)
 
 					Convey("should have 2 outgoing messages (in pending stats)", func() {
-						So(s.PendingStats(time.Now()), ShouldResemble, []int{2, 0})
+						So(s.PendingStats(time.Now()), ShouldResemble, []int{2, 0, 0, 0})
 					})
 
 					Convey("create batch, should only include 1 message, not the 2nd message", func() {
@@ -1050,7 +1067,7 @@ func TestStateSourceMaxPayloadSize(t *testing.T) {
 							So(report.IsEmpty(), ShouldBeTrue)
 
 							Convey("should have 1 outgoing messages", func() {
-								So(s.PendingStats(time.Now()), ShouldResemble, []int{1, 0})
+								So(s.PendingStats(time.Now()), ShouldResemble, []int{1, 0, 0, 0})
 							})
 						})
 					})

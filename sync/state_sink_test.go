@@ -136,6 +136,15 @@ func TestStateSinkBasic(t *testing.T) {
 							So(s.SinkIncoming[key], ShouldHaveLength, 1)
 							So(s.SinkIncoming[key][0].Messages, ShouldHaveLength, 1)
 						})
+
+						Convey("commit batch#2", func() {
+							err := s.SinkCommit(msgs2)
+							So(err, ShouldBeNil)
+
+							Convey("should not have incoming messages", func() {
+								So(s.SinkIncoming[key], ShouldBeEmpty)
+							})
+						})
 					})
 
 					Convey("deliver 2nd msg, empty", func() {
@@ -181,6 +190,13 @@ func TestStateSinkBasic(t *testing.T) {
 							So(errors.Is(err, ErrSourceSequenceBroken), ShouldBeTrue)
 						})
 					})
+				})
+			})
+
+			Convey("register subscription again", func() {
+				err := s.RegisterStartSync(req)
+				Convey("should not have err", func() {
+					So(err, ShouldBeNil)
 				})
 			})
 		})
@@ -332,7 +348,7 @@ func TestStateSinkNak(t *testing.T) {
 					})
 
 					Convey("should have 1 pending ack", func() {
-						So(s.PendingStats(now), ShouldResemble, []int{0, 1})
+						So(s.PendingStats(now), ShouldResemble, []int{0, 0, 1, 0})
 
 						b1, err := s.CreateMessageBatch(time.Now())
 						So(err, ShouldBeNil)

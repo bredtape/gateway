@@ -14,6 +14,7 @@ import (
 )
 
 // sink deliver messages from remote to internal buffer (in-memory), waiting to be committed
+// The Msgs sequence range are not compared to others or any state
 func (s *state) SinkDeliverFromRemote(t time.Time, msgs *v1.Msgs) error {
 	sub := getSinkSubscription(msgs)
 	key := sub.SinkSubscriptionKey
@@ -58,6 +59,7 @@ func (s *state) SinkDeliverFromRemote(t time.Time, msgs *v1.Msgs) error {
 // commit set of incoming messages (which mean they have been persisted at the sink).
 // Incoming messages will not be deleted, if an error is returned.
 // Messages must be persisted with source-sequence
+// To start from last sequnce greater than 0, a SinkCommitReject must be issued
 func (s *state) SinkCommit(msgs *v1.Msgs) error {
 	sub := getSinkSubscription(msgs)
 	key := sub.SinkSubscriptionKey

@@ -10,6 +10,7 @@ import (
 	"time"
 
 	v1 "github.com/bredtape/gateway/sync/v1"
+	"github.com/bredtape/retry"
 	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
 	"github.com/pkg/errors"
@@ -221,73 +222,166 @@ func NewPublishedMessage(msg jetstream.Msg, meta *jetstream.MsgMetadata) Publish
 		Data:               msg.Data()}
 }
 
-// subscribe to a stream and receive messages in order.
-// To unsubscribe, cancel the context.
-func (c *JSConn) SubscribeOrderered(ctx context.Context, stream string, cfg jetstream.OrderedConsumerConfig) (<-chan WithError[PublishedMessage], error) {
+func (c *JSConn) StartSubscribeOrderered2(ctx context.Context, stream string, cfg jetstream.OrderedConsumerConfig) <-chan PublishedMessage {
 	log := logWithConsumerConfig(slog.With("module", "nats_sync", "operation", "SubscribeOrderered"), cfg)
-	innerCtx, cancel := context.WithCancel(ctx)
+	ch := make(chan PublishedMessage)
 
-	js, err := c.Connect(innerCtx)
-	if err != nil {
-		cancel()
-		return nil, errors.Wrap(err, "failed to connect to nats")
-	}
+	r := retry.Must(retry.NewExp(0.2, 100*time.Millisecond, 10*time.Second))
 
-	consumer, err := js.OrderedConsumer(innerCtx, stream, cfg)
-	if err != nil {
-		cancel()
-		return nil, errors.Wrapf(err, "failed to create ordered consumer for stream '%s'", stream)
-	}
-
-	ch := make(chan WithError[PublishedMessage])
 	go func() {
-		defer cancel()
 		defer close(ch)
-
 		lastSequence := uint64(0)
-		for {
-			msg, err := consumer.Next(jetstream.FetchHeartbeat(59*time.Second), jetstream.FetchMaxWait(2*time.Minute))
+		if cfg.DeliverPolicy == jetstream.DeliverByStartSequencePolicy {
+			lastSequence = cfg.OptStartSeq
+		}
+
+		r.Try(ctx, func() error {
+			js, err := c.Connect(ctx)
 			if err != nil {
-				if errors.Is(err, nats.ErrTimeout) {
+				log.Debug("failed to connect to nats", "err", err)
+				return err
+			}
+
+			if lastSequence > 0 {
+				cfg.DeliverPolicy = jetstream.DeliverByStartSequencePolicy
+				cfg.OptStartSeq = lastSequence
+			}
+
+			consumer, err := js.OrderedConsumer(ctx, stream, cfg)
+			if err != nil {
+				log.Error("failed to create ordered consumer", "err", err)
+				return err
+			}
+
+			msgContext, err := consumer.Messages()
+			if err != nil {
+				log.Error("failed to get messages iterator", "err", err)
+				return err
+			}
+			defer msgContext.Stop()
+
+			for {
+				msg, err := msgContext.Next()
+				if err != nil {
+					log.Debug("failed to get next message, retrying", "err", err)
+					return err
+				}
+
+				meta, err := msg.Metadata()
+				if err != nil {
+					log.Error("failed to get message metadata", "err", err)
+					return err
+				}
+
+				pm := NewPublishedMessage(msg, meta)
+				if pm.Sequence == 0 {
+					panic("sequence is 0")
+				}
+
+				if lastSequence >= pm.Sequence {
+					log.Log(ctx, slog.LevelDebug-3, "not relaying message, already processed",
+						"sequence", pm.Sequence, "lastSequence", lastSequence)
 					continue
 				}
-				if innerCtx.Err() != nil {
-					return
+
+				if !relayMessage(ctx, ch, pm) {
+					return ctx.Err()
 				}
-				log.Error("failed to get next message, closing", "err", err)
-				ch <- WithError[PublishedMessage]{Error: err}
-				return
+
+				lastSequence = pm.Sequence
+				err = msg.Ack()
+				if err != nil {
+					log.Debug("failed to ack message", "err", err)
+					return err
+				}
 			}
-
-			meta, err := msg.Metadata()
-			if err != nil {
-				log.Error("failed to get message metadata, closing", "err", err)
-				ch <- WithError[PublishedMessage]{
-					Error: err,
-					Item:  PublishedMessage{Subject: msg.Subject()}}
-				return
-			}
-
-			pm := NewPublishedMessage(msg, meta)
-
-			if lastSequence >= pm.Sequence {
-				log.Log(ctx, slog.LevelDebug-3, "not relaying message, already processed",
-					"sequence", pm.Sequence, "lastSequence", lastSequence)
-			}
-
-			select {
-			case <-innerCtx.Done():
-				return
-			case ch <- WithError[PublishedMessage]{Item: pm}:
-				// nop
-			}
-
-			lastSequence = pm.Sequence
-		}
+		})
 	}()
 
-	return ch, nil
+	return ch
 }
+
+// // start subscribe to a stream and receive messages in order.
+// // To unsubscribe, cancel the context.
+// func (c *JSConn) StartSubscribeOrderered(parentCtx context.Context, stream string, cfg jetstream.OrderedConsumerConfig) <-chan WithError[PublishedMessage] {
+// 	log := logWithConsumerConfig(slog.With("module", "nats_sync", "operation", "SubscribeOrderered"), cfg)
+// 	ctx, cancel := context.WithCancel(parentCtx)
+// 	ch := make(chan WithError[PublishedMessage])
+
+// 	go func() {
+// 		defer cancel()
+// 		defer close(ch)
+
+// 		js, err := c.Connect(ctx)
+// 		if err != nil {
+// 			relayMessage(ctx, ch, WithError[PublishedMessage]{
+// 				Error: errors.Wrap(err, "failed to connect to nats")})
+// 			return
+// 		}
+
+// 		consumer, err := js.OrderedConsumer(ctx, stream, cfg)
+// 		if err != nil {
+// 			relayMessage(ctx, ch, WithError[PublishedMessage]{
+// 				Error: errors.Wrapf(err, "failed to create ordered consumer for stream '%s'", stream)})
+// 			return
+// 		}
+
+// 		msgContext, err := consumer.Messages()
+// 		if err != nil {
+// 			relayMessage(ctx, ch, WithError[PublishedMessage]{
+// 				Error: errors.Wrap(err, "failed to get messages iterator")})
+// 			return
+// 		}
+// 		defer msgContext.Stop()
+
+// 		lastSequence := uint64(0)
+// 		for {
+// 			//msg, err := consumer.Next(jetstream.FetchHeartbeat(59*time.Second), jetstream.FetchMaxWait(2*time.Minute))
+// 			msg, err := msgContext.Next()
+// 			if err != nil {
+// 				log.Error("failed to get next message, closing", "err", err)
+// 				relayMessage(ctx, ch, WithError[PublishedMessage]{Error: err})
+// 				return
+// 			}
+
+// 			meta, err := msg.Metadata()
+// 			if err != nil {
+// 				log.Error("failed to get message metadata, closing", "err", err)
+// 				m := WithError[PublishedMessage]{
+// 					Error: errors.Wrap(err, "failed to get message metadata"),
+// 					Item: PublishedMessage{
+// 						Subject: msg.Subject(),
+// 						Data:    msg.Data(),
+// 						Headers: msg.Headers()}}
+// 				relayMessage(ctx, ch, m)
+// 				return
+// 			}
+
+// 			pm := NewPublishedMessage(msg, meta)
+// 			if pm.Sequence == 0 {
+// 				panic("sequence is 0")
+// 			}
+
+// 			if lastSequence >= pm.Sequence {
+// 				log.Log(ctx, slog.LevelDebug-3, "not relaying message, already processed",
+// 					"sequence", pm.Sequence, "lastSequence", lastSequence)
+// 				continue
+// 			}
+
+// 			if !relayMessage(ctx, ch, WithError[PublishedMessage]{Item: pm}) {
+// 				return
+// 			}
+
+// 			lastSequence = pm.Sequence
+// 			err = msg.Ack()
+// 			if err != nil {
+// 				log.Debug("failed to ack message", "err", err)
+// 			}
+// 		}
+// 	}()
+
+// 	return ch
+// }
 
 // get message with matching sequence from stream. Returns 0..1 messages.
 // Will block if no message exists with sequence (or greater)

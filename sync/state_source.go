@@ -79,7 +79,8 @@ func (s *state) SourceDeliverFromLocal(key SourceSubscriptionKey, lastSequence S
 		if len(pendingMessages) > 0 {
 			seq := SourceSequence(pendingMessages[len(pendingMessages)-1].GetSequence())
 			if seq != lastSequence {
-				return 0, errors.Wrapf(ErrSourceSequenceBroken, "last sequence %d does not match last message %d", lastSequence, seq)
+				return 0, errors.Wrapf(ErrSourceSequenceBroken,
+					"last sequence %d does not match last pending message %d", lastSequence, seq)
 			}
 		}
 
@@ -121,8 +122,13 @@ func (s *state) SourceDeliverFromLocal(key SourceSubscriptionKey, lastSequence S
 		}
 	}
 
-	if len(messages) > 0 && SourceSequence(messages[0].Sequence) < lastSequence {
-		return 0, errors.Wrapf(ErrSourceSequenceBroken, "message sequence %d should be at least lastSequence %d", messages[0].Sequence, lastSequence)
+	if len(messages) > 0 {
+		firstSeq := SourceSequence(messages[0].Sequence)
+		if firstSeq < lastSequence {
+			return 0, errors.Wrapf(ErrSourceSequenceBroken,
+				"the 1st message sequence %d should be at least lastSequence %d",
+				firstSeq, lastSequence)
+		}
 	}
 
 	// only checks before this point
@@ -281,6 +287,14 @@ type SourceSubscription struct {
 	OptStartSeq    SourceSequence
 	OptStartTime   time.Time
 	FilterSubjects []string
+}
+
+func (x SourceSubscription) Equals(y SourceSubscription) bool {
+	return x.SourceSubscriptionKey == y.SourceSubscriptionKey &&
+		x.DeliverPolicy == y.DeliverPolicy &&
+		x.OptStartSeq == y.OptStartSeq &&
+		x.OptStartTime.Equal(y.OptStartTime) &&
+		slices.Equal(x.FilterSubjects, y.FilterSubjects)
 }
 
 func (s SourceSubscription) Clone() SourceSubscription {
