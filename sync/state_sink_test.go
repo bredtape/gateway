@@ -315,7 +315,6 @@ func TestStateSinkNak(t *testing.T) {
 			key := SinkSubscriptionKey{SourceStreamName: "stream1"}
 
 			Convey("deliver a msg with last sequence>0", func() {
-
 				msg := &v1.Msg{
 					Subject:            "x.y.z",
 					Data:               []byte("123"),
@@ -356,6 +355,67 @@ func TestStateSinkNak(t *testing.T) {
 
 						Convey("should indicate nak", func() {
 							So(nak.IsNegative, ShouldBeTrue)
+						})
+						Convey("last sequence", func() {
+							So(nak.SequenceFrom, ShouldEqual, 0)
+						})
+					})
+
+					Convey("dispatch nak", func() {
+						batch1, err := s.CreateMessageBatch(time.Now())
+						So(err, ShouldBeNil)
+
+						report := s.MarkDispatched(batch1)
+						So(report.IsEmpty(), ShouldBeTrue)
+
+						Convey("deliver message with last sequence 0", func() {
+							msg := &v1.Msg{
+								Subject:            "x.y.z",
+								Data:               []byte("123"),
+								Sequence:           31,
+								PublishedTimestamp: timestamppb.Now()}
+
+							msgs1 := &v1.Msgs{
+								SetId:            NewSetID().String(),
+								SourceDeployment: "xx",
+								SinkDeployment:   "yy",
+								SourceStreamName: "stream1",
+								ConsumerConfig:   &v1.ConsumerConfig{DeliverPolicy: v1.DeliverPolicy_DELIVER_POLICY_ALL},
+								LastSequence:     0,
+								Messages:         []*v1.Msg{msg}}
+
+							err := s.SinkDeliverFromRemote(t0, msgs1)
+							So(err, ShouldBeNil)
+
+							Convey("commit messages #1", func() {
+								err := s.SinkCommit(msgs1)
+								So(err, ShouldBeNil)
+
+								Convey("deliver message with last sequence matching previous", func() {
+									msg := &v1.Msg{
+										Subject:            "x.y.z",
+										Data:               []byte("123"),
+										Sequence:           32,
+										PublishedTimestamp: timestamppb.Now()}
+
+									msgs2 := &v1.Msgs{
+										SetId:            NewSetID().String(),
+										SourceDeployment: "xx",
+										SinkDeployment:   "yy",
+										SourceStreamName: "stream1",
+										ConsumerConfig:   &v1.ConsumerConfig{DeliverPolicy: v1.DeliverPolicy_DELIVER_POLICY_ALL},
+										LastSequence:     31,
+										Messages:         []*v1.Msg{msg}}
+
+									err := s.SinkDeliverFromRemote(t0, msgs2)
+									So(err, ShouldBeNil)
+
+									Convey("commit messages#2", func() {
+										err := s.SinkCommit(msgs2)
+										So(err, ShouldBeNil)
+									})
+								})
+							})
 						})
 					})
 				})

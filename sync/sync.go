@@ -597,20 +597,19 @@ func (ns *natsSync) sinkProcessIncoming(ctx context.Context, log *slog.Logger) {
 				if err != nil {
 					log2.Debug("failed to reject messages. Ignoring", "err", err)
 				} else {
-					log2.Debug("rejected messages")
+					log2.Debug("rejected messages, because sequence is before last published")
 				}
 
 				continue
 			}
 
 			if lastPair.SourceSequence < r.From {
-
 				if skipCount >= ns.cs.PendingIncomingMessagesPrSubscriptionDeleteThreshold {
 					err = ns.state.SinkCommitReject(msgs, lastPair.SourceSequence)
 					if err != nil {
 						log2.Debug("failed to reject messages. Ignoring", "err", err)
 					} else {
-						log2.Log(ctx, slog.LevelDebug-3, "rejected messages")
+						log2.Log(ctx, slog.LevelDebug-3, "rejected messages, because sequence is after last published")
 					}
 
 					continue
@@ -648,13 +647,13 @@ func (ns *natsSync) sinkProcessIncoming(ctx context.Context, log *slog.Logger) {
 					if err2 != nil {
 						log2.Debug("failed to reject messages. Ignoring", "err", err2)
 					} else {
-						log2.Debug("rejected messages", "err", err)
+						log2.Debug("rejected messages after publish", "err", err)
 					}
 				} else {
 					log2.Debug("failed to commit messages. Ignoring (should self-correct)", "err", err)
 				}
 			} else {
-				log2.Debug("committed messages")
+				log2.Log(ctx, slog.LevelDebug-3, "committed messages")
 			}
 		}
 	}
@@ -916,13 +915,6 @@ func (ns *natsSync) sourcePublishedMessageToV1(pm PublishedMessage) *v1.Msg {
 		m.Headers[k] = strings.Join(vs, ",")
 	}
 	return m
-}
-
-func (ns *natsSync) getSyncFilterSubjects() []string {
-	return []string{
-		fmt.Sprintf("%s.%s.%s.>", ns.syncStream, ns.from, ns.to),
-		fmt.Sprintf("%s.%s.%s.>", ns.syncStream, ns.to, ns.from),
-	}
 }
 
 // rename subject prefix if a rename is configured.

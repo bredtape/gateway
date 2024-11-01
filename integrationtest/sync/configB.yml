@@ -24,5 +24,5 @@ defaultSettings:
   exchangeOperationTimeout: 5s
   fileExchangeConfig:
     pollingStartDelay: 0s
-    pollingInterval: 1m
-    pollingRetryInterval: 30s
+    pollingInterval: 5s
+    pollingRetryInterval: 2s

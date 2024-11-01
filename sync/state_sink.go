@@ -9,6 +9,7 @@ import (
 	"github.com/bredtape/gateway"
 	v1 "github.com/bredtape/gateway/sync/v1"
 	"github.com/nats-io/nats.go/jetstream"
+	"github.com/negrel/assert"
 	"github.com/pkg/errors"
 	"github.com/smartystreets/goconvey/convey"
 )
@@ -69,22 +70,14 @@ func (s *state) SinkCommit(msgs *v1.Msgs) error {
 			continue
 		}
 
-		seq := RangeInclusive[uint64]{
-			From: pendingMsgs.GetLastSequence(),
-			To:   pendingMsgs.GetLastSequence()}
-
-		if len(pendingMsgs.GetMessages()) > 0 {
-			seq.To = pendingMsgs.GetMessages()[len(pendingMsgs.GetMessages())-1].GetSequence()
-		}
-		if seq.From > seq.To {
-			return errors.New("invalid message range")
-		}
+		seq := getMsgsRange(pendingMsgs)
+		assert.Equal(seq, getMsgsRange(msgs))
 
 		ack := &v1.Acknowledge{
 			SetId:            msgs.GetSetId(),
 			SourceStreamName: msgs.GetSourceStreamName(),
-			SequenceFrom:     seq.From,
-			SequenceTo:       seq.To}
+			SequenceFrom:     uint64(seq.From),
+			SequenceTo:       uint64(seq.To)}
 
 		if w, exists := s.sinkCommit[key]; !exists {
 			// sequence must start from 0
@@ -92,13 +85,13 @@ func (s *state) SinkCommit(msgs *v1.Msgs) error {
 				return errors.Wrapf(ErrSourceSequenceBroken, "nothing committed yet, sequence must start from 0, but was %s", seq)
 			}
 
-			s.sinkCommit[key] = &SinkCommitWindow{CommittedExtrema: seq}
+			s.sinkCommit[key] = &SinkCommitWindow{LowestCommitted: seq.To}
 
 		} else {
 			// sequence must continue from last committed
-			if !seq.ContainsValue(w.CommittedExtrema.To) {
+			if !seq.ContainsValue(w.LowestCommitted) {
 				return errors.Wrapf(ErrSourceSequenceBroken, "sequence range %s must continue from last committed %d",
-					seq, w.CommittedExtrema.To)
+					seq, w.LowestCommitted)
 			}
 		}
 
@@ -128,16 +121,8 @@ func (s *state) SinkCommitReject(msgs *v1.Msgs, lastSequence SourceSequence) err
 			continue
 		}
 
-		seq := RangeInclusive[uint64]{
-			From: pendingMsgs.GetLastSequence(),
-			To:   pendingMsgs.GetLastSequence()}
-
-		if len(pendingMsgs.GetMessages()) > 0 {
-			seq.To = pendingMsgs.GetMessages()[len(pendingMsgs.GetMessages())-1].GetSequence()
-		}
-		if seq.From > seq.To {
-			return errors.New("invalid message range")
-		}
+		seq := getMsgsRange(pendingMsgs)
+		assert.Equal(seq, getMsgsRange(msgs))
 
 		ack := &v1.Acknowledge{
 			SetId:            msgs.GetSetId(),
@@ -203,19 +188,15 @@ func getSinkSubscription(msgs *v1.Msgs) SinkSubscription {
 }
 
 type SinkCommitWindow struct {
-	// extrama, where From is the lowest sequence number committed and To is the highest
-	// received, but not yet committed
-	CommittedExtrema RangeInclusive[uint64]
-
-	// pending acks per source deployment (which is the intended destination).
-	// Acks that have been committed and are waiting to be included in the next batch
-	PendingAcks map[SetID]*v1.Acknowledge
-
 	// lowest committed sequence number. This is used to indicate to the source,
 	// if the subscription should be restarted
 	// If LowestCommitted is 0, the subscription should be restarted.
 	// Otherwise lowest committed MUST match CommittedExtrema.From
-	//LowestCommitted uint64
+	LowestCommitted SourceSequence
+
+	// pending acks per source deployment (which is the intended destination).
+	// Acks that have been committed and are waiting to be included in the next batch
+	PendingAcks map[SetID]*v1.Acknowledge
 }
 
 // commit ack/nak (assuming the matching window has been picked)
@@ -227,9 +208,9 @@ func (w *SinkCommitWindow) Commit(ack *v1.Acknowledge) {
 	w.PendingAcks[id] = ack
 
 	if ack.IsNegative {
-		w.CommittedExtrema = RangeInclusive[uint64]{
-			From: ack.GetSequenceFrom(),
-			To:   ack.GetSequenceFrom()}
+		w.LowestCommitted = SourceSequence(ack.GetSequenceFrom())
+	} else {
+		w.LowestCommitted = SourceSequence(ack.GetSequenceTo())
 	}
 }
 
