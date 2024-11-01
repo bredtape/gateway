@@ -21,15 +21,8 @@ import (
 )
 
 /*
-Refactor and test JSConn.StartSubscribeOrderered. Do not support last pr subject policy.
-	Only exit when ctx is done, other errors must be logged and retried. Do not relay duplicates.
-	Should survive nats restarts and missing streams etc. No panics
-
-	Re-subscribing in *natsSync should have backoff.
-
-	refactor to have 'sync' subscriptions on a separate channel, which
-	then can be read at startup until head is reached. Then, other source subscriptions
-	may be started and exchange read/write may commence.
+TODO:
+* Re-subscribing in *natsSync should have backoff.
 
 */
 
