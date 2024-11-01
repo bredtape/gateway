@@ -383,7 +383,7 @@ func (ns *natsSync) loop(ctx context.Context, log *slog.Logger) error {
 
 			ns.handleSyncMessage(log2, msg)
 
-			if !reachedSyncHead && msg.LastSequence >= SourceSequence(syncHeadSequence) {
+			if !reachedSyncHead && uint64(msg.GetSequenceRange().To) >= syncHeadSequence {
 				reachedSyncHead = true
 				log.Debug("reached sync head")
 			}
@@ -458,6 +458,14 @@ type sourcePublishedMessage struct {
 	// not present on error
 	LastSequence SourceSequence
 	Messages     []*v1.Msg
+}
+
+func (m sourcePublishedMessage) GetSequenceRange() RangeInclusive[SourceSequence] {
+	r := RangeInclusive[SourceSequence]{From: m.LastSequence, To: m.LastSequence}
+	if len(m.Messages) > 0 {
+		r.To = SourceSequence(m.Messages[len(m.Messages)-1].Sequence)
+	}
+	return r
 }
 
 // start subscription to source stream.
