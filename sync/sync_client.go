@@ -44,7 +44,7 @@ func (client *NatsSyncClient) PublishBootstrapSync(ctx context.Context, source, 
 	req := &v1.StartSyncRequest{
 		SourceDeployment: source.String(),
 		SinkDeployment:   sink.String(),
-		SourceStreamName: subscriptionStream, // use placeholder
+		SourceStreamName: SyncStreamPlaceholder, // use placeholder
 		FilterSubjects:   nil,
 		ConsumerConfig: &v1.ConsumerConfig{
 			DeliverPolicy: v1.DeliverPolicy_DELIVER_POLICY_ALL}}

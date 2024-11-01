@@ -1,3 +1,9 @@
+# TODO:
+
+- Refactor 'sync' stream so that it does not contain 'sync of sync' itself (provides this via configuration), because local and remote sync stream becomes out-of-sync because
+  messages are written at both local and remote, but must only be written at the 'source'
+- Add Prometheus metrics to all components
+
 # Intersite communication
 
 Communication between devices that must happen through files, does not provide a convinient abstraction for most client and servers. To facilitate easier Request-Reply when implementing a client or a server, this service/module offers to acts as a Gateway between gRPC client and servers using HTTP2 or nats.io (Jetstream) as a tranport and with sync of nats streams through files.

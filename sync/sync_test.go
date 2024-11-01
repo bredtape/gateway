@@ -2,6 +2,7 @@ package sync
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"testing"
 	"time"
@@ -205,6 +206,44 @@ func TestNatsSyncLowLevelSync(t *testing.T) {
 
 			t.Logf("received message: %s", msg)
 		}
+	}
+}
+
+func TestNatsSyncRenameSubjectPrefix(t *testing.T) {
+	renames := map[string]string{"sync1": "source1"}
+
+	tcs := []struct {
+		Subject  string
+		Expected string
+	}{
+		// basic case
+		{
+			Subject:  "sync1.1.23",
+			Expected: "source1.1.23",
+		},
+		// degenerate cases below
+		{
+			Subject:  "other.1.23",
+			Expected: "other.1.23",
+		},
+		{
+			Subject:  "sync11.1.23",
+			Expected: "sync11.1.23",
+		},
+		{
+			Subject:  "x.sync1.1.23",
+			Expected: "x.sync1.1.23",
+		},
+		{
+			Subject:  "x.y.sync1",
+			Expected: "x.y.sync1",
+		},
+	}
+
+	for idx, tc := range tcs {
+		t.Run(fmt.Sprintf("index %d, subject %s", idx, tc.Subject), func(t *testing.T) {
+			assert.Equal(t, tc.Expected, renameSubjectPrefix(renames, tc.Subject))
+		})
 	}
 }
 

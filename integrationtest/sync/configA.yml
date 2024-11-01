@@ -1,5 +1,6 @@
 deployment: a
-syncStream: sync
+isSyncSource: true
+syncStream: sync1
 
 deploymentSettings:
   b:

@@ -1,8 +1,9 @@
 deployment: b
-syncStream: sync
+syncStream: sync2
 
 deploymentSettings:
   a:
+    isSyncSource: true
     fileExchangeEnabled: true
     fileExchangeConfig:
       incomingDir: /data/in

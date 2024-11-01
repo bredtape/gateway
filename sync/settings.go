@@ -8,6 +8,9 @@ import (
 )
 
 type CommunicationSettings struct {
+	// indicates if the 'sync' stream originates from this deployment. Exactly one deployment must have this set to true
+	IsSyncSource bool
+
 	// --- settings pr subscription ---
 
 	// timeout waiting for ack. Matching Msgs (based on SetID) will be resent.

@@ -148,7 +148,9 @@ func bail(fs *flag.FlagSet, format string, args ...interface{}) {
 }
 
 type NatsSyncConfigSerialize struct {
-	Deployment         gateway.Deployment                       `yaml:"deployment"`
+	Deployment gateway.Deployment `yaml:"deployment"`
+	// indicates if the 'sync' stream originates from this deployment. Exactly one deployment must have this set to true, either this or in the DeploymentSettings
+	IsSyncSource       bool                                     `yaml:"isSyncSource"`
 	SyncStream         string                                   `yaml:"syncStream"`
 	DefaultSettings    DeploymentSetting                        `yaml:"defaultSettings"`
 	DeploymentSettings map[gateway.Deployment]DeploymentSetting `yaml:"deploymentSettings"`
@@ -158,6 +160,7 @@ type NatsSyncConfigSerialize struct {
 func (c NatsSyncConfigSerialize) ToNatsSyncConfig() (sync.NatsSyncConfig, error) {
 	result := sync.NatsSyncConfig{
 		Deployment:            c.Deployment,
+		IsSyncSource:          c.IsSyncSource,
 		SyncStream:            c.SyncStream,
 		CommunicationSettings: make(map[gateway.Deployment]sync.CommunicationSettings),
 		Exchanges:             make(map[gateway.Deployment]sync.Exchange)}
@@ -186,6 +189,8 @@ func (c NatsSyncConfigSerialize) ToNatsSyncConfig() (sync.NatsSyncConfig, error)
 }
 
 type DeploymentSetting struct {
+	// indicates if the 'sync' stream originates from this deployment. Exactly one deployment must have this set to true
+	IsSyncSource                                         bool                    `yaml:"isSyncSource"`
 	AckTimeoutPrSubscription                             time.Duration           `yaml:"ackTimeout"`
 	AckRetryPrSubscriptionJitter                         float64                 `yaml:"ackRetryJitter"`
 	AckRetryPrSubscriptionStep                           time.Duration           `yaml:"ackRetryStep"`
@@ -208,6 +213,7 @@ func (d DeploymentSetting) ToCommunicationSettings() (sync.CommunicationSettings
 		return sync.CommunicationSettings{}, errors.Wrap(err, "failed to create AckRetryPrSubscription")
 	}
 	result := sync.CommunicationSettings{
+		IsSyncSource:                                         d.IsSyncSource,
 		AckTimeoutPrSubscription:                             d.AckTimeoutPrSubscription,
 		AckRetryPrSubscription:                               ackRetry,
 		HeartbeatIntervalPrSubscription:                      d.HeartbeatIntervalPrSubscription,

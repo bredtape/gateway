@@ -37,7 +37,7 @@ const (
 	// subscription stream name placeholder used in published messages.
 	// The actual stream may have a different name and is configured in the NatsSyncConfig for
 	// each deployment
-	subscriptionStream = "sync"
+	SyncStreamPlaceholder = "gateway_sync"
 )
 
 var (
@@ -49,12 +49,9 @@ type NatsSyncConfig struct {
 	// 'this' deployment
 	Deployment gateway.Deployment
 
-	// Stream to persist start/stop sync requests.
-	// Should exist, and must be replicated (by other means) to all deployments participating in the sync.
-	// This implies that requests only can be accepted at the deployment that is the
-	// source of the stream.
-	// Assuming subjects: <sink deployment>.<source_deployment>.<source stream name>
-	// Retention with MaxMsgsPerSubject can be used to limit the number of messages
+	// indicates if the 'sync' stream originates from this deployment. Exactly one deployment must have this set to true
+	IsSyncSource bool
+
 	SyncStream string
 
 	// communication settings pr sink deployment
@@ -68,6 +65,11 @@ func (c NatsSyncConfig) Validate() error {
 	if c.Deployment == "" {
 		return errors.New("deployment empty")
 	}
+	isSyncSourceCount := 0
+	if c.IsSyncSource {
+		isSyncSourceCount++
+	}
+
 	if c.SyncStream == "" {
 		return errors.New("syncStream empty")
 	}
@@ -87,6 +89,17 @@ func (c NatsSyncConfig) Validate() error {
 		if ve := s.Validate(); ve != nil {
 			return errors.Wrapf(ve, "invalid communicationSettings for deployment %s", d)
 		}
+
+		if s.IsSyncSource {
+			isSyncSourceCount++
+		}
+		if isSyncSourceCount > 1 {
+			return errors.New("more than one deployment has IsSyncSource set to true")
+		}
+	}
+
+	if isSyncSourceCount == 0 {
+		return errors.New("no deployment has IsSyncSource set to true")
 	}
 
 	if len(c.Exchanges) == 0 {
@@ -109,36 +122,20 @@ func (c NatsSyncConfig) Validate() error {
 	return nil
 }
 
-func StartNatsSync(ctx context.Context, js *JSConn, config NatsSyncConfig) error {
-	if err := config.Validate(); err != nil {
-		return errors.Wrap(err, "invalid config")
-	}
-
-	for d, cs := range config.CommunicationSettings {
-		ns := &natsSync{
-			from:                config.Deployment,
-			to:                  d,
-			cs:                  cs,
-			syncStream:          config.SyncStream,
-			exchange:            config.Exchanges[d],
-			js:                  js,
-			sinkLastSequence:    make(map[SinkSubscriptionKey]SourceSinkSequence),
-			sourceSubscriptions: make(map[SourceSubscriptionKey]func()),
-			cancelEvent:         make(chan SourceSubscriptionKey)}
-		go ns.outerLoop(ctx)
-	}
-
-	return nil
-}
-
 // nats sync for from and to deployment (bidirectional)
 type natsSync struct {
-	from, to   gateway.Deployment
+	from, to gateway.Deployment
+	// communication settings for 'to'
 	cs         CommunicationSettings
 	syncStream string
-	exchange   Exchange
-	js         *JSConn
-	state      *state
+
+	// rename stream and subject prefix from local name to 'global' name
+	streamRenamesForward map[string]string
+	// rename stream and subject prefix from 'global' name to local name
+	streamRenamesReverse map[string]string
+	exchange             Exchange
+	js                   *JSConn
+	state                *state
 	// last sequence per sink subscription
 	sinkLastSequence map[SinkSubscriptionKey]SourceSinkSequence
 
@@ -147,6 +144,33 @@ type natsSync struct {
 
 	// channel to signal that a source subscription has been cancelled
 	cancelEvent chan SourceSubscriptionKey
+}
+
+func StartNatsSync(ctx context.Context, js *JSConn, config NatsSyncConfig) error {
+	if err := config.Validate(); err != nil {
+		return errors.Wrap(err, "invalid config")
+	}
+
+	for d, cs := range config.CommunicationSettings {
+		ns := &natsSync{
+			from:                 config.Deployment,
+			to:                   d,
+			cs:                   cs,
+			syncStream:           config.SyncStream,
+			streamRenamesForward: map[string]string{config.SyncStream: SyncStreamPlaceholder},
+			streamRenamesReverse: make(map[string]string),
+			exchange:             config.Exchanges[d],
+			js:                   js,
+			sinkLastSequence:     make(map[SinkSubscriptionKey]SourceSinkSequence),
+			sourceSubscriptions:  make(map[SourceSubscriptionKey]func()),
+			cancelEvent:          make(chan SourceSubscriptionKey)}
+		for k, v := range ns.streamRenamesForward {
+			ns.streamRenamesReverse[v] = k
+		}
+		go ns.outerLoop(ctx)
+	}
+
+	return nil
 }
 
 func (ns *natsSync) outerLoop(ctx context.Context) {
@@ -175,35 +199,48 @@ func (ns *natsSync) loop(ctx context.Context, log *slog.Logger) error {
 		ns.state = state
 	}
 
-	// register sync stream itself. Do not specify FilterSubjects, as we want to see
-	// all messages to determine when head has been reached
-	err := ns.state.RegisterStartSync(&v1.StartSyncRequest{
-		SourceStreamName: ns.syncStream,
-		SourceDeployment: ns.from.String(),
-		SinkDeployment:   ns.to.String()})
-	if err != nil {
-		return errors.Wrap(err, "failed to register start sync for 'sync' itself")
+	// register sync stream itself to bootstrap sync
+	{
+		startSyncReq := &v1.StartSyncRequest{
+			SourceStreamName: SyncStreamPlaceholder,
+			SourceDeployment: ns.from.String(),
+			SinkDeployment:   ns.to.String()}
+		// the 'to' deployment is the source
+		if ns.cs.IsSyncSource {
+			startSyncReq = &v1.StartSyncRequest{
+				SourceStreamName: SyncStreamPlaceholder,
+				SourceDeployment: ns.to.String(),
+				SinkDeployment:   ns.from.String()}
+		}
+
+		err := ns.state.RegisterStartSync(startSyncReq)
+		if err != nil {
+			return errors.Wrap(err, "failed to register start sync for 'sync' itself")
+		}
 	}
 
-	syncSubKey := SourceSubscriptionKey{SourceStreamName: ns.syncStream}
-
-	syncHeadSequence, err := ns.js.GetLastSequence(ctx, ns.syncStream)
+	// subscribe to local sync stream
+	syncSubKey := SourceSubscriptionKey{SourceStreamName: SyncStreamPlaceholder}
+	syncHeadSequence, err := ns.js.GetLastSequence(ctx, ns.syncStream) // with the real stream name
 	if err != nil {
-		return errors.Wrap(err, "failed to get last sequence for sync stream")
+		return errors.Wrapf(err, "failed to get last sequence for sync stream '%s'", ns.syncStream)
 	}
-	log.Debug("got last sequence for sync stream", "sequence", syncHeadSequence)
+	log.Debug("got last sequence for sync stream", "sourceStream", syncSubKey, "syncStream", ns.syncStream, "sequence", syncHeadSequence)
 
+	syncSource := make(chan sourcePublishedMessage)
+	ns.sourceStartSubscription(ctx, syncSource, ns.cs.HeartbeatIntervalPrSubscription, SourceSubscription{SourceSubscriptionKey: syncSubKey})
+
+	// start exchange
 	realExchangeIncomingCh, err := ns.exchange.StartReceiving(ctx)
 	if err != nil {
 		return errors.Wrap(err, "failed to start receiving for deployment")
 	}
 
-	// exchangeIncomingCh messages are initially ignored until existing sync requests have been processed
+	// exchangeIncomingCh messages are initially ignored, until existing sync requests have been processed
 	exchangeIncomingCh := make(<-chan *v1.MessageBatch)
-	reachedSyncHead := false
+	reachedSyncHead := syncHeadSequence == 0
 	flushTimerActive := false
-	flushTimer := make(<-chan time.Time)            // disabled
-	syncSource := make(chan sourcePublishedMessage) // channel with sync messages
+	flushTimer := make(<-chan time.Time) // disabled
 	realSourceMessagesCh := make(chan sourcePublishedMessage)
 	disabledSourceMessagesCh := make(chan sourcePublishedMessage)
 	// messages read from sourceMessagesCh but cannot be delivered due to backoff
@@ -217,7 +254,7 @@ func (ns *natsSync) loop(ctx context.Context, log *slog.Logger) error {
 		}
 
 		ns.sinkProcessIncoming(ctx, log)
-		ns.sourceStartSubscriptions(ctx, log, syncSource, realSourceMessagesCh)
+		ns.sourceStartAndCancelSubscriptions(ctx, log, realSourceMessagesCh)
 
 		// if pending messages/acks, start timer for flush, if not already started.
 		if !flushTimerActive && reachedSyncHead {
@@ -327,10 +364,6 @@ func (ns *natsSync) loop(ctx context.Context, log *slog.Logger) error {
 				continue
 			}
 
-			if msg.SourceSubscriptionKey == syncSubKey {
-				slogging.Fatal(log2, "unexpected source subscription key")
-			}
-
 			if !ns.sourceDeliverFromLocal(ctx, log2, msg) {
 				sourceMessagesNotDelivered = append(sourceMessagesNotDelivered, msg)
 			}
@@ -372,7 +405,7 @@ func (ns *natsSync) sourceDeliverFromLocal(ctx context.Context, log2 *slog.Logge
 			return false
 		}
 	} else {
-		log2.Log(ctx, slog.LevelDebug-3, "delivered message(s)", "acceptedCount", count,
+		log2.Log(ctx, slog.LevelDebug-3, "delivered message(s) from local source", "acceptedCount", count,
 			"operation", "state/SourceDeliverFromLocal")
 	}
 
@@ -391,7 +424,7 @@ func (ns *natsSync) sourceCancelSubscription(log *slog.Logger, key SourceSubscri
 	}
 }
 
-func (ns *natsSync) sourceStartSubscriptions(ctx context.Context, log *slog.Logger, syncSource, incoming chan<- sourcePublishedMessage) {
+func (ns *natsSync) sourceStartAndCancelSubscriptions(ctx context.Context, log *slog.Logger, incoming chan<- sourcePublishedMessage) {
 	actives := getMapKeys(ns.sourceSubscriptions)
 	requested := set.NewValues(ns.state.GetSourceLocalSubscriptionKeys()...)
 
@@ -408,19 +441,12 @@ func (ns *natsSync) sourceStartSubscriptions(ctx context.Context, log *slog.Logg
 		}
 
 		subCtx, cancel := context.WithCancel(ctx)
-		if sub.SourceStreamName == ns.syncStream {
-			ns.sourceStartSubscription(subCtx, syncSource, ns.cs.HeartbeatIntervalPrSubscription, sub)
-			log.Debug("started sync subscription",
-				"sourceStreamName", sub.SourceStreamName,
-				"deliverPolicy", sub.DeliverPolicy,
-				"optStartSeq", sub.OptStartSeq)
-		} else {
-			ns.sourceStartSubscription(subCtx, incoming, ns.cs.HeartbeatIntervalPrSubscription, sub)
-			log.Debug("started subscription",
-				"sourceStreamName", sub.SourceStreamName,
-				"deliverPolicy", sub.DeliverPolicy,
-				"optStartSeq", sub.OptStartSeq)
-		}
+		ns.sourceStartSubscription(subCtx, incoming, ns.cs.HeartbeatIntervalPrSubscription, sub)
+		log.Debug("started subscription",
+			"sourceStreamName", sub.SourceStreamName,
+			"deliverPolicy", sub.DeliverPolicy,
+			"optStartSeq", sub.OptStartSeq)
+
 		ns.sourceSubscriptions[key] = cancel
 	}
 }
@@ -441,6 +467,13 @@ func (ns *natsSync) sourceStartSubscription(ctx context.Context, incoming chan<-
 	log := slog.With("operation", "sourceStartSubscription",
 		"sourceStreamName", sub.SourceStreamName,
 		"deliverPolicy", sub.DeliverPolicy)
+	realStream, exists := ns.streamRenamesReverse[sub.SourceStreamName]
+	if !exists {
+		realStream = sub.SourceStreamName
+	}
+	if realStream != sub.SourceStreamName {
+		log = log.With("realStream", realStream)
+	}
 	cfg := jetstream.OrderedConsumerConfig{
 		DeliverPolicy:  sub.DeliverPolicy,
 		OptStartSeq:    uint64(sub.OptStartSeq),
@@ -461,7 +494,7 @@ func (ns *natsSync) sourceStartSubscription(ctx context.Context, incoming chan<-
 		lastActivity := time.Time{}
 		lastSequenceRelayed := SourceSequence(0)
 
-		ch := ns.js.StartSubscribeOrderered2(ctx, sub.SourceStreamName, cfg)
+		ch := ns.js.StartSubscribeOrderered2(ctx, realStream, cfg)
 
 		for {
 			select {
@@ -480,7 +513,13 @@ func (ns *natsSync) sourceStartSubscription(ctx context.Context, incoming chan<-
 				m := sourcePublishedMessage{
 					SourceSubscriptionKey: sub.SourceSubscriptionKey,
 					LastSequence:          lastSequence,
-					Messages:              []*v1.Msg{publishedMessageToV1(msg)}}
+					Messages:              []*v1.Msg{ns.sourcePublishedMessageToV1(msg)}}
+
+				subject := m.Messages[0].GetSubject()
+				if !strings.HasPrefix(subject, sub.SourceStreamName) {
+					slogging.Fatal(log, "unexpected subject", "subject", subject, "sourceSubscriptionKey", sub.SourceSubscriptionKey,
+						"renamesForward", ns.streamRenamesForward, "renamesReverse", ns.streamRenamesReverse)
+				}
 
 				log2 := log.With("lastSequence", lastSequence, "sequence", msg.Sequence)
 				log2.Log(ctx, slog.LevelDebug-3, "have message to send")
@@ -542,7 +581,7 @@ func (ns *natsSync) sinkProcessIncoming(ctx context.Context, log *slog.Logger) {
 			lastPair, err := ns.getLastSourceSinkSequencePublished(opCtx, key, true)
 			cancel()
 			if err != nil {
-				log.Error("failed to get last sequence", "err", err)
+				log.Error("failed to get last sequence", "err", err, "sourceStreamName", key.SourceStreamName)
 				continue
 			}
 
@@ -585,7 +624,7 @@ func (ns *natsSync) sinkProcessIncoming(ctx context.Context, log *slog.Logger) {
 			ms := msgIncludeFromSequence(lastPair.SourceSequence, msgs.GetMessages())
 
 			opCtx, cancel = context.WithTimeout(ctx, ns.cs.NatsOperationTimeout)
-			seq, err := ns.publishMsgs(opCtx, lastPair, msgs.GetSourceStreamName(), ms)
+			seq, err := ns.sinkPublishMsgs(opCtx, lastPair, msgs.GetSourceStreamName(), ms)
 			cancel()
 			if err != nil {
 				if isJetstreamConcurrencyError(err) {
@@ -734,12 +773,18 @@ func (ns *natsSync) handleSyncMessage(parentLog *slog.Logger, spm sourcePublishe
 	}
 }
 
-func (ns *natsSync) publishMsgs(ctx context.Context, lastSequence SourceSinkSequence, stream string, ms []*v1.Msg) (SourceSinkSequence, error) {
+func (ns *natsSync) sinkPublishMsgs(ctx context.Context, lastSequence SourceSinkSequence, stream string, ms []*v1.Msg) (SourceSinkSequence, error) {
+	realStream, exists := ns.streamRenamesReverse[stream]
+	if !exists {
+		realStream = stream
+	}
 	for _, m := range ms {
-		ack, err := ns.js.PublishRaw(ctx, stream, lastSequence.SinkSequence, m)
+		m.Subject = renameSubjectPrefix(ns.streamRenamesReverse, m.GetSubject())
+		ack, err := ns.js.PublishRaw(ctx, realStream, lastSequence.SinkSequence, m)
 		if err != nil {
-			return SourceSinkSequence{}, errors.Wrapf(err, "failed to publish message with subject %s, sequence %d",
-				m.GetSubject(), m.GetSequence())
+			return SourceSinkSequence{}, errors.Wrapf(err,
+				"failed to publish message to stream '%s' with subject '%s', sequence %d",
+				realStream, m.GetSubject(), m.GetSequence())
 		}
 
 		lastSequence.SinkSequence = SinkSequence(ack.Sequence)
@@ -751,6 +796,7 @@ func (ns *natsSync) publishMsgs(ctx context.Context, lastSequence SourceSinkSequ
 
 // get last nats sequence published to stream.
 // Returns jetstream.ErrStreamNotFound if stream does not exist
+// NB: Does not consider FilterSubjects!
 func (ns *natsSync) getLastSourceSinkSequencePublished(ctx context.Context, key SinkSubscriptionKey, acceptCached bool) (SourceSinkSequence, error) {
 	if acceptCached {
 		if seq, exists := ns.sinkLastSequence[key]; exists {
@@ -758,9 +804,14 @@ func (ns *natsSync) getLastSourceSinkSequencePublished(ctx context.Context, key 
 		}
 	}
 
-	sinkSeq, err := ns.js.GetLastSequence(ctx, key.SourceStreamName)
+	realStream, exists := ns.streamRenamesReverse[key.SourceStreamName]
+	if !exists {
+		realStream = key.SourceStreamName
+	}
+
+	sinkSeq, err := ns.js.GetLastSequence(ctx, realStream)
 	if err != nil {
-		return SourceSinkSequence{}, errors.Wrap(err, "failed to get stream info")
+		return SourceSinkSequence{}, errors.Wrapf(err, "failed to get stream info '%s'", realStream)
 	}
 
 	if sinkSeq == 0 {
@@ -849,16 +900,43 @@ func getMapKeys[K comparable, V any](m map[K]V) set.Set[K] {
 	return keys
 }
 
-func publishedMessageToV1(pm PublishedMessage) *v1.Msg {
+func (ns *natsSync) sourcePublishedMessageToV1(pm PublishedMessage) *v1.Msg {
 	m := &v1.Msg{
-		Subject:            pm.Subject,
+		Subject:            renameSubjectPrefix(ns.streamRenamesForward, pm.Subject),
 		Headers:            make(map[string]string),
 		Data:               pm.Data,
 		Sequence:           pm.Sequence,
 		PublishedTimestamp: timestamppb.New(pm.PublishedTimestamp)}
 
 	for k, vs := range pm.Headers {
+		// remove nats headers except MsgID
+		if strings.HasPrefix(k, "Nats-") && k != jetstream.MsgIDHeader {
+			continue
+		}
 		m.Headers[k] = strings.Join(vs, ",")
 	}
 	return m
+}
+
+func (ns *natsSync) getSyncFilterSubjects() []string {
+	return []string{
+		fmt.Sprintf("%s.%s.%s.>", ns.syncStream, ns.from, ns.to),
+		fmt.Sprintf("%s.%s.%s.>", ns.syncStream, ns.to, ns.from),
+	}
+}
+
+// rename subject prefix if a rename is configured.
+// Assume that stream subjects has the stream name as prefix
+func renameSubjectPrefix(renames map[string]string, subject string) string {
+	xs := strings.SplitN(subject, ".", 2)
+	if len(xs) != 2 {
+		return subject
+	}
+	prefix := xs[0]
+	other, exists := renames[prefix]
+	if !exists {
+		return subject
+	}
+
+	return other + subject[len(prefix):]
 }

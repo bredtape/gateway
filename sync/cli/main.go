@@ -12,8 +12,6 @@ import (
 	"github.com/urfave/cli/v2"
 )
 
-const syncStreamName = "sync"
-
 /*
 global options:
   --server     # nats server. Required
@@ -46,6 +44,11 @@ func main() {
 				Name:  "seed-file",
 				Usage: "Nats .nk seed file",
 			},
+			&cli.StringFlag{
+				Name:  "sync_stream",
+				Usage: "sync stream name (at this location)",
+				Value: sync.SyncStreamPlaceholder,
+			},
 		},
 		Commands: []*cli.Command{
 			{
@@ -61,7 +64,11 @@ func main() {
 								return err
 							}
 
-							return bootstrapCreate(c.Context, js)
+							syncStreamName, err := getSyncStreamName(c)
+							if err != nil {
+								return err
+							}
+							return bootstrapCreate(c.Context, js, syncStreamName)
 						},
 					},
 					{
@@ -74,13 +81,18 @@ func main() {
 								return err
 							}
 
+							syncStreamName, err := getSyncStreamName(c)
+							if err != nil {
+								return err
+							}
+
 							from := c.Args().Get(0)
 							to := c.Args().Get(1)
 							if from == "" || to == "" {
 								return errors.New("from and to are required")
 							}
 
-							return bootstrapSync(c.Context, js, from, to)
+							return bootstrapSync(c.Context, js, syncStreamName, from, to)
 						},
 					},
 				},
@@ -100,21 +112,7 @@ func main() {
 								return err
 							}
 
-							from := c.Args().Get(0)
-							to := c.Args().Get(1)
-							streamName := c.Args().Get(2)
-							if from == "" || to == "" || streamName == "" {
-								return errors.New("from, to  and stream name are required")
-							}
-
-							return syncStart(c.Context, js, from, to, streamName)
-						},
-					},
-					{
-						Name:  "stop",
-						Usage: "stop [from] [to] [source stream name]",
-						Action: func(c *cli.Context) error {
-							js, err := getJS(c)
+							syncStreamName, err := getSyncStreamName(c)
 							if err != nil {
 								return err
 							}
@@ -126,7 +124,31 @@ func main() {
 								return errors.New("from, to  and stream name are required")
 							}
 
-							return syncStop(c.Context, js, from, to, streamName)
+							return syncStart(c.Context, js, syncStreamName, from, to, streamName)
+						},
+					},
+					{
+						Name:  "stop",
+						Usage: "stop [from] [to] [source stream name]",
+						Action: func(c *cli.Context) error {
+							js, err := getJS(c)
+							if err != nil {
+								return err
+							}
+
+							syncStreamName, err := getSyncStreamName(c)
+							if err != nil {
+								return err
+							}
+
+							from := c.Args().Get(0)
+							to := c.Args().Get(1)
+							streamName := c.Args().Get(2)
+							if from == "" || to == "" || streamName == "" {
+								return errors.New("from, to  and stream name are required")
+							}
+
+							return syncStop(c.Context, js, syncStreamName, from, to, streamName)
 						},
 					},
 				},
@@ -139,7 +161,7 @@ func main() {
 	}
 }
 
-func bootstrapCreate(ctx context.Context, js *sync.JSConn) error {
+func bootstrapCreate(ctx context.Context, js *sync.JSConn, syncStreamName string) error {
 	return js.CreateStream(ctx, jetstream.StreamConfig{
 		Name:              syncStreamName,
 		Description:       "Stream for persisting Start/Stop sync requests. Must exist at all 'deployments' participating in the sync. Subjects: <sink deployment>.<source_deployment>.<source stream name>.A Start request must exist for the sync stream itself",
@@ -149,21 +171,21 @@ func bootstrapCreate(ctx context.Context, js *sync.JSConn) error {
 		MaxMsgsPerSubject: 10})
 }
 
-func bootstrapSync(ctx context.Context, js *sync.JSConn, from, to string) error {
+func bootstrapSync(ctx context.Context, js *sync.JSConn, syncStreamName string, from, to string) error {
 	req := &v1.StartSyncRequest{
 		SourceDeployment: from,
 		SinkDeployment:   to,
-		SourceStreamName: syncStreamName,
+		SourceStreamName: sync.SyncStreamPlaceholder,
 		FilterSubjects:   nil,
 		ConsumerConfig: &v1.ConsumerConfig{
 			DeliverPolicy: v1.DeliverPolicy_DELIVER_POLICY_ALL}}
 
-	subject := fmt.Sprintf("%s.%s.%s.%s", syncStreamName, to, from, syncStreamName)
+	subject := fmt.Sprintf("%s.%s.%s.%s", syncStreamName, to, from, sync.SyncStreamPlaceholder)
 	_, err := js.PublishProto(ctx, subject, nil, req, jetstream.WithExpectStream(syncStreamName))
 	return err
 }
 
-func syncStart(ctx context.Context, js *sync.JSConn, from, to, streamName string) error {
+func syncStart(ctx context.Context, js *sync.JSConn, syncStreamName, from, to, streamName string) error {
 	req := &v1.StartSyncRequest{
 		SourceDeployment: from,
 		SinkDeployment:   to,
@@ -177,11 +199,11 @@ func syncStart(ctx context.Context, js *sync.JSConn, from, to, streamName string
 	return err
 }
 
-func syncStop(ctx context.Context, js *sync.JSConn, from, to, streamName string) error {
+func syncStop(ctx context.Context, js *sync.JSConn, syncStreamName, from, to, streamName string) error {
 	req := &v1.StopSyncRequest{
 		SourceDeployment: from,
 		SinkDeployment:   to,
-		SourceStreamName: streamName,
+		SourceStreamName: sync.SyncStreamPlaceholder,
 		FilterSubjects:   nil}
 
 	subject := fmt.Sprintf("%s.%s.%s.%s", syncStreamName, to, from, streamName)
@@ -203,4 +225,12 @@ func getJS(c *cli.Context) (*sync.JSConn, error) {
 		}
 	}
 	return sync.NewJSConn(cfg), nil
+}
+
+func getSyncStreamName(c *cli.Context) (string, error) {
+	s := c.String("sync_stream")
+	if s == "" {
+		return "", errors.New("sync stream name is required")
+	}
+	return s, nil
 }
