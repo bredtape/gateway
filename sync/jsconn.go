@@ -64,7 +64,7 @@ func NewJSConn(config JSConfig) *JSConn {
 	}
 }
 
-// acquire connection to jetstream. Do not modify returned jetstream reference
+// acquire shared connection to jetstream. Do not modify returned jetstream reference
 // The context is only used to obtain a connection, not for the connection itself.
 func (c *JSConn) Connect(ctx context.Context) (jetstream.JetStream, error) {
 	// try to acquire lock
@@ -252,16 +252,11 @@ func (c *JSConn) StartSubscribeOrderered2(ctx context.Context, stream string, cf
 				log.Error("failed to create ordered consumer", "err", err)
 				return err
 			}
-
-			msgContext, err := consumer.Messages()
-			if err != nil {
-				log.Error("failed to get messages iterator", "err", err)
-				return err
-			}
-			defer msgContext.Stop()
+			log.Debug("created ordered consumer", "stream", stream, "deliverPolicy", cfg.DeliverPolicy, "optStartSeq", cfg.OptStartSeq)
 
 			for {
-				msg, err := msgContext.Next()
+				// with default heartbeat
+				msg, err := consumer.Next()
 				if err != nil {
 					log.Debug("failed to get next message, retrying", "err", err)
 					return err
@@ -278,7 +273,7 @@ func (c *JSConn) StartSubscribeOrderered2(ctx context.Context, stream string, cf
 					panic("sequence is 0")
 				}
 
-				if lastSequence >= pm.Sequence {
+				if pm.Sequence < lastSequence {
 					log.Log(ctx, slog.LevelDebug-3, "not relaying message, already processed",
 						"sequence", pm.Sequence, "lastSequence", lastSequence)
 					continue
@@ -289,11 +284,8 @@ func (c *JSConn) StartSubscribeOrderered2(ctx context.Context, stream string, cf
 				}
 
 				lastSequence = pm.Sequence
-				err = msg.Ack()
-				if err != nil {
-					log.Debug("failed to ack message", "err", err)
-					return err
-				}
+
+				// sending ack should not be necessary
 			}
 		})
 	}()
