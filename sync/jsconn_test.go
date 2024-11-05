@@ -32,10 +32,6 @@ func getNatsURLs() string {
 	return urls
 }
 
-// any err handler we can hook into?
-// what does the MessageContext handle that Next does not?
-// when does MessageContext.Next fail? does it retry on all errors (related to connection and consumer)?
-
 func TestJSConnStartSubscribeOrdereredConsumerNext(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -226,7 +222,9 @@ func TestJSConnSubscribeConsumerTest(t *testing.T) {
 					xs = append(xs, msg)
 				}
 			}()
-			consumerConfig := jetstream.OrderedConsumerConfig{DeliverPolicy: jetstream.DeliverByStartSequencePolicy, OptStartSeq: startSeq}
+			consumerConfig := jetstream.OrderedConsumerConfig{
+				DeliverPolicy: jetstream.DeliverByStartSequencePolicy,
+				OptStartSeq:   startSeq}
 			lastSeq, err := js.subscribeConsumer(ctx, ch, streamName, consumerConfig)
 			if err != nil {
 				if !errors.Is(err, context.Canceled) {
