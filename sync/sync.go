@@ -172,10 +172,14 @@ func (ns *natsSync) outerLoop(ctx context.Context) {
 	r.Try(ctx, func() error {
 		log := slog.With("from", ns.from, "to", ns.to)
 
+		metricsSyncInitCount.WithLabelValues(ns.labelsFromTo()...).Inc()
+		mErr := metricsSyncInitErrorCount.WithLabelValues(ns.labelsFromTo()...)
+
 		ctxInner, cancel := context.WithCancel(ctx)
 		err := ns.loop(ctxInner, log)
 		cancel()
 		if err != nil {
+			mErr.Inc()
 			log.Error("loop failed, will restart", "err", err)
 		}
 		return err
@@ -185,6 +189,8 @@ func (ns *natsSync) outerLoop(ctx context.Context) {
 func (ns *natsSync) loop(ctx context.Context, log *slog.Logger) error {
 	log.Log(ctx, slog.LevelDebug-3, "start loop")
 	defer log.Log(ctx, slog.LevelDebug-3, "exited loop")
+	mSyncHead := metricsSyncHead.WithLabelValues(ns.labelsFromTo()...)
+	mSyncHead.Set(0)
 
 	if state, err := newState(ns.from, ns.to, ns.cs, nil); err != nil {
 		return errors.Wrap(err, "failed to create state")
@@ -241,6 +247,7 @@ func (ns *natsSync) loop(ctx context.Context, log *slog.Logger) error {
 
 	for {
 		if reachedSyncHead {
+			mSyncHead.Set(1)
 			exchangeIncomingCh = realExchangeIncomingCh
 		} else {
 			log.Debug("waiting for all existing sync requests to be read")
@@ -306,8 +313,12 @@ func (ns *natsSync) loop(ctx context.Context, log *slog.Logger) error {
 			flushTimerActive = false
 			flushTimer = make(<-chan time.Time) // disabled
 
+			metricsBatchWriteTotal.WithLabelValues(ns.labelsFromTo()...).Inc()
+			mErr := metricsBatchWriteErrorTotal.WithLabelValues(ns.labelsFromTo()...)
+
 			batch, err := ns.state.CreateMessageBatch(time.Now())
 			if err != nil {
+				mErr.Inc()
 				log.Error("failed to create message batch", "err", err)
 				continue
 			}
@@ -315,12 +326,14 @@ func (ns *natsSync) loop(ctx context.Context, log *slog.Logger) error {
 			err = ns.exchange.Write(opCtx, batch)
 			cancel()
 			if err != nil {
+				mErr.Inc()
 				log.Error("failed to write message batch. Ignoring", "err", err)
 			} else {
 				log.Log(ctx, slog.LevelDebug-3, "wrote message batch")
 
 				report := ns.state.MarkDispatched(batch)
 				if !report.IsEmpty() {
+					mErr.Inc()
 					log.Debug("mark dispatched failed", "report", report)
 				}
 			}
@@ -331,7 +344,11 @@ func (ns *natsSync) loop(ctx context.Context, log *slog.Logger) error {
 				return errors.New("incoming channel closed")
 			}
 
+			metricsHandleIncomingTotal.WithLabelValues(ns.labelsFromTo()...).Inc()
+			mErr := metricsHandleIncomingErrorTotal.WithLabelValues(ns.labelsFromTo()...)
+
 			if !ns.matchesThisDeployment(msg) {
+				mErr.Inc()
 				log.Warn("ignoring batch, not matching this deployment",
 					"batchFrom", msg.GetFromDeployment(), "batchTo", msg.GetToDeployment())
 				continue
@@ -340,6 +357,7 @@ func (ns *natsSync) loop(ctx context.Context, log *slog.Logger) error {
 			log.Log(ctx, slog.LevelDebug-3, "received incoming message")
 			err := ns.handleIncomingRemoteMessage(msg)
 			if err != nil {
+				mErr.Inc()
 				log.Error("failed to handle incoming message, ignoring", "err", err)
 			}
 
@@ -398,6 +416,7 @@ func (ns *natsSync) sourceDeliverFromLocal(ctx context.Context, log2 *slog.Logge
 			return false
 		}
 	} else {
+		ns.setMetricsSourceDeliveredLastSequence(msg.SourceSubscriptionKey, msg.GetSequenceRange().To)
 		log2.Log(ctx, slog.LevelDebug-3, "delivered message(s) from local source", "acceptedCount", count,
 			"operation", "state/SourceDeliverFromLocal")
 	}
@@ -414,7 +433,16 @@ func (ns *natsSync) sourceCancelSubscription(log *slog.Logger, key SourceSubscri
 		go func() {
 			ns.cancelEvent <- key
 		}()
+		ns.deleteMetricsSourceDeliveredLastSequence(key)
 	}
+}
+
+func (ns *natsSync) setMetricsSourceDeliveredLastSequence(key SourceSubscriptionKey, seq SourceSequence) {
+	metricsSourceDeliveredLastSequence.WithLabelValues(string(ns.from), string(ns.to), key.SourceStreamName).Set(float64(seq))
+}
+
+func (ns *natsSync) deleteMetricsSourceDeliveredLastSequence(key SourceSubscriptionKey) {
+	metricsSourceDeliveredLastSequence.DeleteLabelValues(string(ns.from), string(ns.to), key.SourceStreamName)
 }
 
 func (ns *natsSync) sourceStartAndCancelSubscriptions(ctx context.Context, log *slog.Logger, incoming chan<- sourcePublishedMessage) {
@@ -468,6 +496,7 @@ func (ns *natsSync) sourceStartSubscription(ctx context.Context, incoming chan<-
 	log := slog.With("operation", "sourceStartSubscription",
 		"sourceStreamName", sub.SourceStreamName,
 		"deliverPolicy", sub.DeliverPolicy)
+	ns.setMetricsSourceDeliveredLastSequence(sub.SourceSubscriptionKey, 0) // initialize label
 	realStream, exists := ns.streamRenamesReverse[sub.SourceStreamName]
 	if !exists {
 		realStream = sub.SourceStreamName
@@ -580,10 +609,14 @@ func (ns *natsSync) sinkProcessIncoming(ctx context.Context, log *slog.Logger) {
 	for key, xs := range ns.state.SinkIncoming {
 		skipCount := 0
 		for _, msgs := range xs {
+			metricsProcessIncomingTotal.WithLabelValues(ns.labelsFromToSource(key)...).Inc()
+			mErr := metricsProcessIncomingErrorTotal.WithLabelValues(ns.labelsFromToSource(key)...)
+
 			opCtx, cancel := context.WithTimeout(ctx, ns.cs.NatsOperationTimeout)
 			lastPair, err := ns.getLastSourceSinkSequencePublished(opCtx, key, true)
 			cancel()
 			if err != nil {
+				mErr.Inc()
 				log.Error("failed to get last sequence", "err", err, "sourceStreamName", key.SourceStreamName)
 				continue
 			}
@@ -598,6 +631,7 @@ func (ns *natsSync) sinkProcessIncoming(ctx context.Context, log *slog.Logger) {
 			if lastPair.SourceSequence > r.To {
 				err := ns.state.SinkCommitReject(msgs, lastPair.SourceSequence)
 				if err != nil {
+					mErr.Inc()
 					log2.Debug("failed to reject messages. Ignoring", "err", err)
 				} else {
 					log2.Debug("rejected messages, because sequence is before last published")
@@ -610,6 +644,7 @@ func (ns *natsSync) sinkProcessIncoming(ctx context.Context, log *slog.Logger) {
 				if skipCount >= ns.cs.PendingIncomingMessagesPrSubscriptionDeleteThreshold {
 					err = ns.state.SinkCommitReject(msgs, lastPair.SourceSequence)
 					if err != nil {
+						mErr.Inc()
 						log2.Debug("failed to reject messages. Ignoring", "err", err)
 					} else {
 						log2.Log(ctx, slog.LevelDebug-3, "rejected messages, because sequence is after last published")
@@ -629,6 +664,7 @@ func (ns *natsSync) sinkProcessIncoming(ctx context.Context, log *slog.Logger) {
 			seq, err := ns.sinkPublishMsgs(opCtx, lastPair, msgs.GetSourceStreamName(), ms)
 			cancel()
 			if err != nil {
+				mErr.Inc()
 				if isJetstreamConcurrencyError(err) {
 					log2.Debug("jetstream concurrency error, removing cached value of last sequence. Will retry, later", "err", err)
 					delete(ns.sinkLastSequence, key)
@@ -648,6 +684,7 @@ func (ns *natsSync) sinkProcessIncoming(ctx context.Context, log *slog.Logger) {
 				if errors.Is(err, ErrSourceSequenceBroken) {
 					err2 := ns.state.SinkCommitReject(msgs, seq.SourceSequence)
 					if err2 != nil {
+						mErr.Inc()
 						log2.Debug("failed to reject messages. Ignoring", "err", err2)
 					} else {
 						log2.Debug("rejected messages after publish", "err", err)
@@ -934,4 +971,12 @@ func renameSubjectPrefix(renames map[string]string, subject string) string {
 	}
 
 	return other + subject[len(prefix):]
+}
+
+func (ns *natsSync) labelsFromTo() []string {
+	return []string{string(ns.from), string(ns.to)}
+}
+
+func (ns *natsSync) labelsFromToSource(sub SinkSubscriptionKey) []string {
+	return []string{string(ns.from), string(ns.to), sub.SourceStreamName}
 }
