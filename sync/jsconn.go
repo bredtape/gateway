@@ -13,6 +13,7 @@ import (
 	"github.com/bredtape/retry"
 	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
+	"github.com/negrel/assert"
 	"github.com/pkg/errors"
 	"google.golang.org/protobuf/proto"
 )
@@ -85,6 +86,8 @@ func (c *JSConn) Connect(ctx context.Context) (jetstream.JetStream, error) {
 	case <-ctx.Done():
 		return nil, ctx.Err()
 	}
+
+	slog.Debug("not connected, connecting", "urls", c.config.URLs)
 
 	// no existing connection, connect
 	nc, err := nats.Connect(c.config.URLs, c.config.Options...)
@@ -222,75 +225,109 @@ func NewPublishedMessage(msg jetstream.Msg, meta *jetstream.MsgMetadata) Publish
 		Data:               msg.Data()}
 }
 
-func (c *JSConn) StartSubscribeOrderered2(ctx context.Context, stream string, cfg jetstream.OrderedConsumerConfig) <-chan PublishedMessage {
-	log := logWithConsumerConfig(slog.With("module", "nats_sync", "operation", "SubscribeOrderered"), cfg)
+func (c *JSConn) StartSubscribeOrderered(ctx context.Context, stream string, cfg jetstream.OrderedConsumerConfig) <-chan PublishedMessage {
 	ch := make(chan PublishedMessage)
 
 	r := retry.Must(retry.NewExp(0.2, 100*time.Millisecond, 10*time.Second))
 
 	go func() {
 		defer close(ch)
+
+		// bugs when OptStartTime is set although DeliverPolicy is not DeliverByStartTimePolicy
+		if cfg.DeliverPolicy != jetstream.DeliverByStartTimePolicy {
+			cfg.OptStartTime = nil
+		}
+
+		if cfg.DeliverPolicy == jetstream.DeliverByStartSequencePolicy && cfg.OptStartSeq == 0 {
+			cfg.DeliverPolicy = jetstream.DeliverAllPolicy
+		}
+
 		lastSequence := uint64(0)
+
 		if cfg.DeliverPolicy == jetstream.DeliverByStartSequencePolicy {
 			lastSequence = cfg.OptStartSeq
 		}
 
 		r.Try(ctx, func() error {
-			js, err := c.Connect(ctx)
-			if err != nil {
-				log.Debug("failed to connect to nats", "err", err)
-				return err
-			}
-
 			if lastSequence > 0 {
 				cfg.DeliverPolicy = jetstream.DeliverByStartSequencePolicy
 				cfg.OptStartSeq = lastSequence
 			}
 
-			consumer, err := js.OrderedConsumer(ctx, stream, cfg)
-			if err != nil {
-				log.Error("failed to create ordered consumer", "err", err)
-				return err
+			lastSequenceRelayed, err := c.subscribeConsumer(ctx, ch, stream, cfg)
+			if lastSequenceRelayed > lastSequence {
+				lastSequence = lastSequenceRelayed
 			}
-			log.Debug("created ordered consumer", "stream", stream, "deliverPolicy", cfg.DeliverPolicy, "optStartSeq", cfg.OptStartSeq)
 
-			for {
-				// with default heartbeat
-				msg, err := consumer.Next()
-				if err != nil {
-					log.Debug("failed to get next message, retrying", "err", err)
-					return err
-				}
-
-				meta, err := msg.Metadata()
-				if err != nil {
-					log.Error("failed to get message metadata", "err", err)
-					return err
-				}
-
-				pm := NewPublishedMessage(msg, meta)
-				if pm.Sequence == 0 {
-					panic("sequence is 0")
-				}
-
-				if pm.Sequence < lastSequence {
-					log.Log(ctx, slog.LevelDebug-3, "not relaying message, already processed",
-						"sequence", pm.Sequence, "lastSequence", lastSequence)
-					continue
-				}
-
-				if !relayMessage(ctx, ch, pm) {
-					return ctx.Err()
-				}
-
-				lastSequence = pm.Sequence
-
-				// sending ack should not be necessary
-			}
+			return err
 		})
 	}()
 
 	return ch
+}
+
+func (c *JSConn) subscribeConsumer(ctx context.Context, ch chan PublishedMessage, stream string, cfg jetstream.OrderedConsumerConfig) (uint64, error) {
+	log := slog.With("module", "nats_sync", "operation", "SubscribeOrderered", "stream", stream)
+	log = logWithConsumerConfig(log, cfg)
+
+	js, err := c.Connect(ctx)
+	if err != nil {
+		log.Debug("failed to connect to nats", "err", err)
+		return 0, err
+	}
+
+	consumer, err := js.OrderedConsumer(ctx, stream, cfg)
+	if err != nil {
+		log.Error("failed to create ordered consumer", "err", err)
+		return 0, err
+	}
+
+	log.Debug("created ordered consumer")
+
+	lastSequenceRelayed := uint64(0)
+	if cfg.DeliverPolicy == jetstream.DeliverByStartSequencePolicy {
+		lastSequenceRelayed = cfg.OptStartSeq
+	}
+
+	for ctx.Err() == nil {
+		// with default heartbeat
+		msg, err := consumer.Next()
+		if err != nil {
+			if errors.Is(err, nats.ErrTimeout) {
+				log.Log(ctx, slog.LevelDebug-6, "nats timeout (due to heartbeat). Continue")
+				continue
+			}
+			log.Debug("failed to get next message, retrying", "err", err)
+			return lastSequenceRelayed, err
+		}
+
+		meta, err := msg.Metadata()
+		if err != nil {
+			log.Error("failed to get message metadata", "err", err)
+			return lastSequenceRelayed, err
+		}
+
+		pm := NewPublishedMessage(msg, meta)
+		assert.NotEqual(pm.Sequence, uint64(0))
+		assert.Equal(pm.Sequence, meta.Sequence.Stream)
+
+		if pm.Sequence < lastSequenceRelayed {
+			log.Log(ctx, slog.LevelWarn, "already processed",
+				"meta.sequence.consumer", meta.Sequence.Consumer, "sequence", pm.Sequence, "lastSequenceRelayed", lastSequenceRelayed)
+			return lastSequenceRelayed, errors.Errorf("sequence %d is less than lastSequence %d", pm.Sequence, lastSequenceRelayed)
+			//continue
+		}
+
+		if !relayMessage(ctx, ch, pm) {
+			return lastSequenceRelayed, ctx.Err()
+		}
+
+		lastSequenceRelayed = pm.Sequence
+		log.Log(ctx, slog.LevelDebug-3, "relayed message", "sequence", pm.Sequence)
+
+		// sending ack should not be necessary
+	}
+	return lastSequenceRelayed, ctx.Err()
 }
 
 // get message with matching sequence from stream. Returns 0..1 messages.

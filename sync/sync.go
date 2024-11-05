@@ -478,8 +478,10 @@ func (ns *natsSync) sourceStartSubscription(ctx context.Context, incoming chan<-
 	cfg := jetstream.OrderedConsumerConfig{
 		DeliverPolicy:  sub.DeliverPolicy,
 		OptStartSeq:    uint64(sub.OptStartSeq),
-		OptStartTime:   &sub.OptStartTime,
 		FilterSubjects: sub.FilterSubjects}
+	if cfg.DeliverPolicy == jetstream.DeliverByStartTimePolicy {
+		cfg.OptStartTime = &sub.OptStartTime
+	}
 
 	lastSequence := SourceSequence(0)
 	if sub.DeliverPolicy == jetstream.DeliverByStartSequencePolicy {
@@ -495,7 +497,7 @@ func (ns *natsSync) sourceStartSubscription(ctx context.Context, incoming chan<-
 		lastActivity := time.Time{}
 		lastSequenceRelayed := SourceSequence(0)
 
-		ch := ns.js.StartSubscribeOrderered2(ctx, realStream, cfg)
+		ch := ns.js.StartSubscribeOrderered(ctx, realStream, cfg)
 
 		for {
 			select {
@@ -818,7 +820,7 @@ func (ns *natsSync) getLastSourceSinkSequencePublished(ctx context.Context, key 
 		return SourceSinkSequence{}, nil
 	}
 
-	xs, err := ns.js.GetMessageWithSequence(ctx, key.SourceStreamName, sinkSeq)
+	xs, err := ns.js.GetMessageWithSequence(ctx, realStream, sinkSeq)
 	if err != nil {
 		return SourceSinkSequence{}, errors.Wrap(err, "failed to get message with sequence")
 	}

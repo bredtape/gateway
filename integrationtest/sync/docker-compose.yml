@@ -28,7 +28,9 @@ services:
 
   nats_a:
     image: ${NATS_IMAGE}
-    command: --debug
+    command: >
+      --debug
+      --trace
       --name natsA
       --jetstream
       --store_dir /data
@@ -58,7 +60,8 @@ services:
 
   nats_b:
     image: ${NATS_IMAGE}
-    command: --debug
+    command: >
+      --debug
       --name natsB
       --jetstream
       --store_dir /data

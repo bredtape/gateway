@@ -8,7 +8,8 @@ RUN go mod download
 
 COPY . .
 
-RUN go build -tags=assert sync/cmd/main.go
+RUN go build sync/cmd/main.go
 
-ENTRYPOINT [ "/app/main" ]
+#ENTRYPOINT [  "go", "run", "sync/cmd/main.go" ]
+ENTRYPOINT [  "/app/main" ]
 CMD [ ]
