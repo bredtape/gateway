@@ -14,6 +14,7 @@ import (
 	"github.com/bredtape/gateway/sync"
 	"github.com/bredtape/retry"
 	"github.com/bredtape/slogging"
+	"github.com/nats-io/nats.go"
 	"github.com/peterbourgon/ff/v3"
 	"github.com/pkg/errors"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
@@ -98,7 +99,7 @@ func main() {
 		slogging.Fatal(log, "failed to load/parse/validate sync config", "err", err)
 	}
 
-	jsConf := sync.JSConfig{URLs: cfg.NatsURLs}
+	jsConf := sync.JSConfig{URLs: cfg.NatsURLs, Options: []nats.Option{nats.MaxReconnects(-1)}}
 	if cfg.NatsSeedFile != "" {
 		err = jsConf.WithSeedFile(cfg.NatsSeedFile)
 		if err != nil {

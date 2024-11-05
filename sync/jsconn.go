@@ -5,6 +5,7 @@ import (
 	"crypto/tls"
 	"fmt"
 	"log/slog"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -87,10 +88,24 @@ func (c *JSConn) Connect(ctx context.Context) (jetstream.JetStream, error) {
 		return nil, ctx.Err()
 	}
 
-	slog.Debug("not connected, connecting", "urls", c.config.URLs)
+	log := slog.With("module", "sync", "operation", "JSConn/Connect", "urls", c.config.URLs)
+	log.Debug("not connected, connecting")
+
+	var options []nats.Option
+	options = append(options, nats.MaxReconnects(-1))
+
+	options = append(options, nats.DisconnectErrHandler(func(nc *nats.Conn, err error) {
+		log.Error("nats disconnected", "err", err, "status", nc.Status())
+	}))
+
+	options = append(options, nats.ReconnectHandler(func(nc *nats.Conn) {
+		log.Info("nats reconnected", "status", nc.Status())
+	}))
+
+	allOptions := slices.Concat(options, c.config.Options)
 
 	// no existing connection, connect
-	nc, err := nats.Connect(c.config.URLs, c.config.Options...)
+	nc, err := nats.Connect(c.config.URLs, allOptions...)
 	if err != nil {
 		return nil, errors.Wrap(err, "failed to connect or bad options")
 	}
@@ -234,6 +249,7 @@ func (c *JSConn) StartSubscribeOrderered(ctx context.Context, stream string, cfg
 		defer close(ch)
 
 		// bugs when OptStartTime is set although DeliverPolicy is not DeliverByStartTimePolicy
+		// https://github.com/nats-io/nats.go/issues/1734
 		if cfg.DeliverPolicy != jetstream.DeliverByStartTimePolicy {
 			cfg.OptStartTime = nil
 		}
@@ -267,8 +283,9 @@ func (c *JSConn) StartSubscribeOrderered(ctx context.Context, stream string, cfg
 }
 
 func (c *JSConn) subscribeConsumer(ctx context.Context, ch chan PublishedMessage, stream string, cfg jetstream.OrderedConsumerConfig) (uint64, error) {
-	log := slog.With("module", "nats_sync", "operation", "SubscribeOrderered", "stream", stream)
+	log := slog.With("module", "nats_sync", "operation", "SubscribeOrdered", "stream", stream)
 	log = logWithConsumerConfig(log, cfg)
+	defer log.Log(ctx, slog.LevelDebug-3, "stopped")
 
 	js, err := c.Connect(ctx)
 	if err != nil {
@@ -282,6 +299,13 @@ func (c *JSConn) subscribeConsumer(ctx context.Context, ch chan PublishedMessage
 		return 0, err
 	}
 
+	messageContext, err := consumer.Messages(jetstream.WithMessagesErrOnMissingHeartbeat(true))
+	if err != nil {
+		log.Error("failed to get message context", "err", err)
+		return 0, err
+	}
+	defer messageContext.Stop()
+
 	log.Debug("created ordered consumer")
 
 	lastSequenceRelayed := uint64(0)
@@ -291,11 +315,15 @@ func (c *JSConn) subscribeConsumer(ctx context.Context, ch chan PublishedMessage
 
 	for ctx.Err() == nil {
 		// with default heartbeat
-		msg, err := consumer.Next()
+
+		msg, err := messageContext.Next()
 		if err != nil {
 			if errors.Is(err, nats.ErrTimeout) {
-				log.Log(ctx, slog.LevelDebug-6, "nats timeout (due to heartbeat). Continue")
+				log.Log(ctx, slog.LevelDebug-3, "nats timeout (due to heartbeat). Continue")
 				continue
+			}
+			if errors.Is(err, jetstream.ErrMsgIteratorClosed) && ctx.Err() != nil {
+				return lastSequenceRelayed, ctx.Err()
 			}
 			log.Debug("failed to get next message, retrying", "err", err)
 			return lastSequenceRelayed, err

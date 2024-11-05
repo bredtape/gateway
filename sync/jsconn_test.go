@@ -162,14 +162,9 @@ func TestJSConnSubscribeOrdered(t *testing.T) {
 			defer wg.Done()
 			log.Info("subscribe from", "startSeq", startSeq)
 
-			now := time.Time{}
 			consumerConfig := jetstream.OrderedConsumerConfig{
 				DeliverPolicy: jetstream.DeliverByStartSequencePolicy,
-				OptStartSeq:   startSeq,
-				OptStartTime:  &now,
-			}
-			//ch := make(chan PublishedMessage)
-			//js.subscribeConsumer(ctx, ch, streamName, consumerConfig)
+				OptStartSeq:   startSeq}
 			ch := js.StartSubscribeOrderered(ctx, streamName, consumerConfig)
 
 			msg := <-ch
