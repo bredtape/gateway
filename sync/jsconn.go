@@ -24,8 +24,8 @@ import (
 var (
 	metricsNatsConnected = promauto.NewGaugeVec(prometheus.GaugeOpts{
 		Namespace: "gateway",
-		Name:      "nats_connection_state",
-		Help:      "Nats connection state (0=disconnected, 1=connected, 2=closed, 3=reconnecting, 4=connecting)"}, []string{"urls"})
+		Name:      "nats_connection_status",
+		Help:      "Nats connection status (0=disconnected, 1=connected, 2=closed, 3=reconnecting, 4=connecting)"}, []string{"urls"})
 )
 
 const (
