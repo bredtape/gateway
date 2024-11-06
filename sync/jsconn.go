@@ -16,7 +16,16 @@ import (
 	"github.com/nats-io/nats.go/jetstream"
 	"github.com/negrel/assert"
 	"github.com/pkg/errors"
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promauto"
 	"google.golang.org/protobuf/proto"
+)
+
+var (
+	metricsNatsConnected = promauto.NewGaugeVec(prometheus.GaugeOpts{
+		Namespace: "gateway",
+		Name:      "nats_connection_state",
+		Help:      "Nats connection state (0=disconnected, 1=connected, 2=closed, 3=reconnecting, 4=connecting)"}, []string{"urls"})
 )
 
 const (
@@ -93,15 +102,6 @@ func (c *JSConn) Connect(ctx context.Context) (jetstream.JetStream, error) {
 
 	var options []nats.Option
 	options = append(options, nats.MaxReconnects(-1))
-
-	options = append(options, nats.DisconnectErrHandler(func(nc *nats.Conn, err error) {
-		log.Error("nats disconnected", "err", err, "status", nc.Status())
-	}))
-
-	options = append(options, nats.ReconnectHandler(func(nc *nats.Conn) {
-		log.Info("nats reconnected", "status", nc.Status())
-	}))
-
 	allOptions := slices.Concat(options, c.config.Options)
 
 	// no existing connection, connect
@@ -109,6 +109,15 @@ func (c *JSConn) Connect(ctx context.Context) (jetstream.JetStream, error) {
 	if err != nil {
 		return nil, errors.Wrap(err, "failed to connect or bad options")
 	}
+
+	go func() {
+		metricConnected := metricsNatsConnected.WithLabelValues(c.config.URLs)
+		metricConnected.Set(float64(nc.Status()))
+		for status := range nc.StatusChanged(nats.DISCONNECTED, nats.CONNECTED, nats.CLOSED, nats.RECONNECTING, nats.CONNECTING) {
+			metricConnected.Set(float64(status))
+			log.Debug("nats connection status changed", "status", status)
+		}
+	}()
 
 	if len(c.config.JetstreamAPIPrefix) > 0 {
 		js, err := jetstream.NewWithAPIPrefix(nc, c.config.JetstreamAPIPrefix)
