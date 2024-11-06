@@ -24,6 +24,24 @@ var (
 		Help:      "Whether the sync state reached the head of the 'sync' stream"},
 		[]string{"from", "to"})
 
+	metricsSourceDeliverAttempts = promauto.NewCounterVec(prometheus.CounterOpts{
+		Namespace: "gateway",
+		Name:      "state_sync_source_deliver_attempts_total",
+		Help:      "The total number of attempts to deliver some messages by the source"},
+		[]string{"from", "to", "source_stream"})
+
+	metricsSourceDeliverAttemptsError = promauto.NewCounterVec(prometheus.CounterOpts{
+		Namespace: "gateway",
+		Name:      "state_sync_source_deliver_attempts_error_total",
+		Help:      "The total number of attempts to deliver some messages by the source, that resulted in some error"},
+		[]string{"from", "to", "source_stream"})
+
+	metricsSourceAcceptTotal = promauto.NewCounterVec(prometheus.CounterOpts{
+		Namespace: "gateway",
+		Name:      "state_sync_source_deliver_messages_accepted_total",
+		Help:      "The total number of messages delivered and accepted at the source (then waiting to be sent)"},
+		[]string{"from", "to", "source_stream"})
+
 	metricsSourceDeliveredLastSequence = promauto.NewGaugeVec(prometheus.GaugeOpts{
 		Namespace: "gateway",
 		Name:      "state_sync_source_delivered_last_sequence",

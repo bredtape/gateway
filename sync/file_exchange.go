@@ -210,7 +210,7 @@ func (ex *FileExchange) Write(_ context.Context, batch *v1.MessageBatch) error {
 		return errors.Wrapf(err, "failed to write to tmp file %s", tmpFilename)
 	}
 
-	log.Log(context.Background(), slog.LevelDebug-3, "rename")
+	log.Log(context.Background(), slog.LevelDebug-6, "rename")
 	err = os.Rename(tmpFilename, filename)
 	if err != nil {
 		log.Error("failed to rename", "err", err)

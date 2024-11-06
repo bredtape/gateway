@@ -404,8 +404,15 @@ func (ns *natsSync) loop(ctx context.Context, log *slog.Logger) error {
 
 // source, deliver messages from local state. Returns true if processed, false if backoff
 func (ns *natsSync) sourceDeliverFromLocal(ctx context.Context, log2 *slog.Logger, msg sourcePublishedMessage) bool {
+	// init labels
+	metricLast := metricsSourceDeliveredLastSequence.WithLabelValues(ns.labelsFromToStream(msg.SourceSubscriptionKey.SourceStreamName)...)
+	metricsSourceDeliverAttempts.WithLabelValues(ns.labelsFromToStream(msg.SourceSubscriptionKey.SourceStreamName)...).Inc()
+	metricErr := metricsSourceDeliverAttemptsError.WithLabelValues(ns.labelsFromToStream(msg.SourceSubscriptionKey.SourceStreamName)...)
+
 	count, err := ns.state.SourceDeliverFromLocal(msg.SourceSubscriptionKey, msg.LastSequence, msg.Messages...)
+	metricsSourceAcceptTotal.WithLabelValues(ns.labelsFromToStream(msg.SourceSubscriptionKey.SourceStreamName)...).Add(float64(count))
 	if err != nil {
+		metricErr.Inc()
 		log2.Log(ctx, slog.LevelDebug-3, "failed to deliver message", "err", err,
 			"operation", "state/SourceDeliverFromLocal",
 			"lastSequence", msg.LastSequence, "count", len(msg.Messages))
@@ -416,7 +423,7 @@ func (ns *natsSync) sourceDeliverFromLocal(ctx context.Context, log2 *slog.Logge
 			return false
 		}
 	} else {
-		ns.setMetricsSourceDeliveredLastSequence(msg.SourceSubscriptionKey, msg.GetSequenceRange().To)
+		metricLast.Set(float64(msg.GetSequenceRange().To))
 		log2.Log(ctx, slog.LevelDebug-3, "delivered message(s) from local source", "acceptedCount", count,
 			"operation", "state/SourceDeliverFromLocal")
 	}
@@ -433,16 +440,12 @@ func (ns *natsSync) sourceCancelSubscription(log *slog.Logger, key SourceSubscri
 		go func() {
 			ns.cancelEvent <- key
 		}()
-		ns.deleteMetricsSourceDeliveredLastSequence(key)
+		metricsSourceDeliveredLastSequence.DeleteLabelValues(ns.labelsFromToStream(key.SourceStreamName)...)
 	}
 }
 
-func (ns *natsSync) setMetricsSourceDeliveredLastSequence(key SourceSubscriptionKey, seq SourceSequence) {
-	metricsSourceDeliveredLastSequence.WithLabelValues(string(ns.from), string(ns.to), key.SourceStreamName).Set(float64(seq))
-}
-
-func (ns *natsSync) deleteMetricsSourceDeliveredLastSequence(key SourceSubscriptionKey) {
-	metricsSourceDeliveredLastSequence.DeleteLabelValues(string(ns.from), string(ns.to), key.SourceStreamName)
+func (ns *natsSync) labelsFromToStream(stream string) []string {
+	return []string{ns.from.String(), ns.to.String(), stream}
 }
 
 func (ns *natsSync) sourceStartAndCancelSubscriptions(ctx context.Context, log *slog.Logger, incoming chan<- sourcePublishedMessage) {
@@ -496,7 +499,7 @@ func (ns *natsSync) sourceStartSubscription(ctx context.Context, incoming chan<-
 	log := slog.With("operation", "sourceStartSubscription",
 		"sourceStreamName", sub.SourceStreamName,
 		"deliverPolicy", sub.DeliverPolicy)
-	ns.setMetricsSourceDeliveredLastSequence(sub.SourceSubscriptionKey, 0) // initialize label
+	metricsSourceDeliveredLastSequence.WithLabelValues(ns.labelsFromToStream(sub.SourceStreamName)...) // initialize label
 	realStream, exists := ns.streamRenamesReverse[sub.SourceStreamName]
 	if !exists {
 		realStream = sub.SourceStreamName
@@ -609,8 +612,8 @@ func (ns *natsSync) sinkProcessIncoming(ctx context.Context, log *slog.Logger) {
 	for key, xs := range ns.state.SinkIncoming {
 		skipCount := 0
 		for _, msgs := range xs {
-			metricsProcessIncomingTotal.WithLabelValues(ns.labelsFromToSource(key)...).Inc()
-			mErr := metricsProcessIncomingErrorTotal.WithLabelValues(ns.labelsFromToSource(key)...)
+			metricsProcessIncomingTotal.WithLabelValues(ns.labelsFromToStream(key.SourceStreamName)...).Inc()
+			mErr := metricsProcessIncomingErrorTotal.WithLabelValues(ns.labelsFromToStream(key.SourceStreamName)...)
 
 			opCtx, cancel := context.WithTimeout(ctx, ns.cs.NatsOperationTimeout)
 			lastPair, err := ns.getLastSourceSinkSequencePublished(opCtx, key, true)
@@ -975,8 +978,4 @@ func renameSubjectPrefix(renames map[string]string, subject string) string {
 
 func (ns *natsSync) labelsFromTo() []string {
 	return []string{string(ns.from), string(ns.to)}
-}
-
-func (ns *natsSync) labelsFromToSource(sub SinkSubscriptionKey) []string {
-	return []string{string(ns.from), string(ns.to), sub.SourceStreamName}
 }
