@@ -1,17 +1,12 @@
-deployment: a
-isSyncSource: true
+deployment: c
 syncStream: sync1
 
 deploymentSettings:
-  b:
-    fileExchangeEnabled: true
-    fileExchangeConfig:
-      incomingDir: /data/in
-      outgoingDir: /data/out
-  c:
+  a:
+    isSyncSource: true
     httpExchangeEnabled: true
     httpExchangeConfig:
-      clientURL: http://sync_c:8900/httpExchange/a/in
+      clientURL: http://sync_a:8900/httpExchange/c/in
 
 defaultSettings:
   ackTimeout: 5s

@@ -1,11 +1,12 @@
 volumes:
   nats-dataA:
   nats-dataB:
+  nats-dataC:
   file-outA:
   file-inA:
 
 networks:
-  netA:
+  netA: # also used by 'c'
   netB:
 
 services:
@@ -71,3 +72,32 @@ services:
       - "4322:4222" # non-standard port
     networks:
       - netB
+
+  sync_c:
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+    environment:
+      SYNC_LOG_LEVEL: debug-3
+      SYNC_NATS_URLS: nats://nats_c:4222
+      SYNC_CONFIG_FILE: /config/configC.yml
+    volumes:
+      - "./:/config/:ro"
+    networks:
+      - netA
+    ports:
+      - 8902:8900
+
+  nats_c:
+    image: ${NATS_IMAGE}
+    command: >
+      --debug
+      --name natsC
+      --jetstream
+      --store_dir /data
+    volumes:
+      - nats-dataC:/data
+    ports:
+      - "4422:4222" # non-standard port
+    networks:
+      - netA
