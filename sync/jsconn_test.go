@@ -1,3 +1,5 @@
+//go:build nats
+
 package sync
 
 import (

@@ -1,3 +1,5 @@
+//go:build nats
+
 package sync
 
 import (
@@ -71,11 +73,16 @@ func TestNatsSyncLowLevelSync(t *testing.T) {
 		PollingRetryInterval: 100 * time.Millisecond}
 
 	defaultCommSettings := CommunicationSettings{
-		AckTimeoutPrSubscription:        time.Second,
-		AckRetryPrSubscription:          retry.Must(retry.NewExp(0.2, 10*time.Millisecond, 500*time.Millisecond)),
-		HeartbeatIntervalPrSubscription: 100 * time.Millisecond,
-		MaxAccumulatedPayloadSizeBytes:  4 << 20, // 4 MB
-		PendingAcksPrSubscriptionMax:    5}
+		AckTimeoutPrSubscription:                             100 * time.Millisecond,
+		AckRetryPrSubscription:                               retry.Must(retry.NewExp(0.2, 10*time.Millisecond, time.Second)),
+		HeartbeatIntervalPrSubscription:                      time.Second,
+		MaxAccumulatedPayloadSizeBytes:                       4 << 20, // 4 MB
+		PendingAcksPrSubscriptionMax:                         5,
+		PendingIncomingMessagesPrSubscriptionMaxBuffered:     10,
+		PendingIncomingMessagesPrSubscriptionDeleteThreshold: 5,
+		NatsOperationTimeout:                                 time.Second,
+		BatchFlushTimeout:                                    20 * time.Millisecond,
+		ExchangeOperationTimeout:                             time.Second}
 
 	// deployment A
 	var clientA *NatsSyncClient
@@ -87,6 +94,7 @@ func TestNatsSyncLowLevelSync(t *testing.T) {
 		cs := defaultCommSettings
 		config := NatsSyncConfig{
 			Deployment:            da,
+			IsSyncSource:          true,
 			SyncStream:            generateRandomString() + "subscription",
 			CommunicationSettings: map[gateway.Deployment]CommunicationSettings{db: cs},
 			Exchanges:             map[gateway.Deployment]Exchange{db: ex}}

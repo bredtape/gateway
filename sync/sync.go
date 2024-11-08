@@ -773,11 +773,11 @@ func (ns *natsSync) handleSyncMessage(parentLog *slog.Logger, spm sourcePublishe
 			continue
 		}
 		if len(pm.Data) == 0 {
-			log.Error("missing header "+headerGrpcMessageType, "contentType", pm.Headers[headerContentType])
+			log.Error("missing header "+headerProtoType, "contentType", pm.Headers[headerContentType])
 			continue
 		}
 
-		msgType := pm.Headers[headerGrpcMessageType]
+		msgType := pm.Headers[headerProtoType]
 		switch msgType {
 		case startSyncRequestName:
 			var msg v1.StartSyncRequest

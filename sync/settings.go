@@ -96,8 +96,8 @@ func (s CommunicationSettings) Validate() error {
 	if s.NatsOperationTimeout < time.Second {
 		return errors.New("NatsOperationTimeout must be at least 1 s")
 	}
-	if s.BatchFlushTimeout < 20*time.Millisecond {
-		return errors.New("BatchFlushTimeout must be at least 20 ms")
+	if s.BatchFlushTimeout < 1*time.Millisecond {
+		return errors.New("BatchFlushTimeout must be at least 1 ms")
 	}
 	if s.ExchangeOperationTimeout < time.Second {
 		return errors.New("ExchangeOperationTimeout must be at least 1 s")

@@ -2,16 +2,18 @@ package sync
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/base64"
 	"fmt"
 	"io/fs"
 	"log/slog"
 	"os"
 	"path"
 	"regexp"
+	"strings"
 	"time"
 
 	v1 "github.com/bredtape/gateway/sync/v1"
-	"github.com/cespare/xxhash"
 	"github.com/fsnotify/fsnotify"
 	"github.com/pkg/errors"
 	"google.golang.org/protobuf/proto"
@@ -140,13 +142,19 @@ func (ex *FileExchange) StartReceiving(ctx context.Context) (<-chan *v1.MessageB
 				msg, err := ex.consumeFile(filename)
 				if err != nil {
 					log2.Error("failed to unmarshal", "err", err)
-				} else if msg != nil {
-					select {
-					case <-ctx.Done():
-						return
-					case resultCh <- msg:
-						log2.Log(ctx, slog.LevelDebug-3, "relayed message exchange")
-					}
+					continue
+				}
+
+				if msg == nil {
+					log2.Log(ctx, slog.LevelDebug-3, "no message to relay (check sum failed or not relevant)")
+					continue
+				}
+
+				select {
+				case <-ctx.Done():
+					return
+				case resultCh <- msg:
+					log2.Log(ctx, slog.LevelDebug-3, "relayed message exchange")
 				}
 
 			case event, ok := <-watcher.Events:
@@ -160,13 +168,19 @@ func (ex *FileExchange) StartReceiving(ctx context.Context) (<-chan *v1.MessageB
 					msg, err := ex.consumeFile(event.Name)
 					if err != nil {
 						log2.Error("failed to unmarshal", "err", err, "filename", event.Name, "op", event.Op.String())
-					} else if msg != nil {
-						select {
-						case <-ctx.Done():
-							return
-						case resultCh <- msg:
-							log2.Log(ctx, slog.LevelDebug-3, "relayed message exchange", "basename", path.Base(event.Name))
-						}
+						continue
+					}
+
+					if msg == nil {
+						log2.Log(ctx, slog.LevelDebug-3, "no message to relay (check sum failed or not relevant)")
+						continue
+					}
+
+					select {
+					case <-ctx.Done():
+						return
+					case resultCh <- msg:
+						log2.Log(ctx, slog.LevelDebug-3, "relayed message exchange", "basename", path.Base(event.Name))
 					}
 				}
 
@@ -255,33 +269,35 @@ func (ex *FileExchange) consumeFile(filename string) (*v1.MessageBatch, error) {
 	return &msg, nil
 }
 
-var reBaseMatch = regexp.MustCompile(`^([0-9]{6})_([0-9]+).me$`)
+// regular expression to match base filename consisting of a counter and a sha256 of data with base64 url encoding
+var reBaseMatch = regexp.MustCompile(`^([0-9]{6})_(sha256=X(?:[A-Za-z0-9-_]{4})*(?:[A-Za-z0-9-_]{2}==|[A-Za-z0-9-_]{3}=)?).me$`)
 
 func isRelevantFile(filename string) bool {
-	return reBaseMatch.MatchString(path.Base(filename))
+	return strings.HasSuffix(path.Base(filename), ".me")
 }
 
+// create filename consisting of an incrementing counter and a hash of the data
 func (ex *FileExchange) createFilename(data []byte) string {
-	d := xxhash.New()
-	d.Write(data) // does not error
-	hash := d.Sum64()
-
 	counter := ex.nextCounter()
-	return fmt.Sprintf("%06d_%d.me", counter, hash)
+	return fmt.Sprintf("%06d_%s.me", counter, hashSHA256AndBase64(data))
+}
+
+// hash data with sha256 and encode to base64
+func hashSHA256AndBase64(data []byte) string {
+	d := sha256.New()
+	d.Write(data) // does not error
+	return "sha256=X" + base64.URLEncoding.EncodeToString(d.Sum(nil))
 }
 
 func verifyHash(data []byte, filename string) error {
-	d := xxhash.New()
-	d.Write(data) // does not error
-	hash := d.Sum64()
+	hash := hashSHA256AndBase64(data)
 
 	matches := reBaseMatch.FindStringSubmatch(path.Base(filename))
 	if len(matches) != 3 {
 		return errors.New("filename does not match expected format")
 	}
 
-	hashStr := matches[2]
-	if hashStr != fmt.Sprintf("%d", hash) {
+	if matches[2] != hash {
 		return errors.New("hash mismatch")
 	}
 

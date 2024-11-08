@@ -29,10 +29,10 @@ var (
 )
 
 const (
-	contentTypeProto      = "application/grpc+proto"
-	headerContentType     = "content-type"
-	headerGrpcMessageType = "grpc-message-type"
-	headerSourceSequence  = "sync-source-sequence"
+	contentTypeProto     = "application/protobuf"
+	headerContentType    = "content-type"
+	headerProtoType      = "protobuf-message-type"
+	headerSourceSequence = "sync-source-sequence"
 )
 
 type JSConfig struct {
@@ -143,8 +143,8 @@ func (c *JSConn) PublishProto(ctx context.Context, subject string, headers map[s
 	}
 
 	h := map[string][]string{
-		headerContentType:     {contentTypeProto},
-		headerGrpcMessageType: {string(m.ProtoReflect().Descriptor().FullName())}}
+		headerContentType: {contentTypeProto},
+		headerProtoType:   {string(m.ProtoReflect().Descriptor().FullName())}}
 
 	for k, vs := range headers {
 		if _, exists := h[k]; exists {
