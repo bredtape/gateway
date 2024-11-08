@@ -6,7 +6,6 @@ require (
 	github.com/bredtape/retry v0.0.1
 	github.com/bredtape/set v0.0.3
 	github.com/bredtape/slogging v0.0.0-20240412063852-f039b2c82b7f
-	github.com/cespare/xxhash v1.1.0
 	github.com/fsnotify/fsnotify v1.8.0
 	github.com/google/uuid v1.6.0
 	github.com/nats-io/nats.go v1.37.0

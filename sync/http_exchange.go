@@ -9,6 +9,7 @@ import (
 	"net/url"
 	"regexp"
 
+	"github.com/bredtape/gateway"
 	v1 "github.com/bredtape/gateway/sync/v1"
 	"github.com/pkg/errors"
 	"google.golang.org/protobuf/proto"
@@ -25,13 +26,13 @@ var (
 
 type HTTPExchangeConfig struct {
 	// this deployment. Only accept messages to this deployment
-	From string
+	From gateway.Deployment `yaml:"-"`
 
 	// remote deployment. Will be added to headers
-	To string
+	To gateway.Deployment `yaml:"-"`
 
 	// client URL to post outgoing MessageBatch'es
-	ClientURL string
+	ClientURL string `yaml:"clientURL"`
 }
 
 func (c HTTPExchangeConfig) Validate() error {
@@ -124,7 +125,7 @@ func (ex *HTTPExchange) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if msg.GetToDeployment() != ex.cfg.From {
+	if msg.GetToDeployment() != ex.cfg.From.String() {
 		http.Error(w, "deployment not accepted", http.StatusBadRequest)
 		return
 	}
@@ -156,8 +157,8 @@ func (ex *HTTPExchange) Write(ctx context.Context, msg *v1.MessageBatch) error {
 	req.Header.Set(headerContentType, contentTypeProto)
 	req.Header.Set(headerProtoType, protobufMessageType_MessageBatch)
 	req.Header.Set(headerDigest, hashSHA256AndBase64(data))
-	req.Header.Set(headerFrom, ex.cfg.From)
-	req.Header.Set(headerTo, ex.cfg.To)
+	req.Header.Set(headerFrom, ex.cfg.From.String())
+	req.Header.Set(headerTo, ex.cfg.To.String())
 
 	resp, err := ex.client.Do(req)
 	if err != nil {
@@ -167,7 +168,7 @@ func (ex *HTTPExchange) Write(ctx context.Context, msg *v1.MessageBatch) error {
 
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
-		slog.Debug("write failed", "module", "sync", "op", "HTTPExchange/Write", "status", resp.StatusCode, "body", string(body))
+		slog.Debug("write failed", "module", "sync", "op", "HTTPExchange/Write", "status", resp.StatusCode, "body", string(body), "clientURL", ex.cfg.ClientURL)
 		return errors.Errorf("expected status OK; got status code %d", resp.StatusCode)
 	}
 	return nil

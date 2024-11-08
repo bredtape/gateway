@@ -4,12 +4,14 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"strings"
 
 	"github.com/bredtape/gateway/sync"
 	v1 "github.com/bredtape/gateway/sync/v1"
 	"github.com/nats-io/nats.go/jetstream"
 	"github.com/pkg/errors"
 	"github.com/urfave/cli/v2"
+	"google.golang.org/protobuf/proto"
 )
 
 /*

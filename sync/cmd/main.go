@@ -94,7 +94,9 @@ func main() {
 
 	log := slog.With("module", "sync/cmd")
 
-	syncConf, err := loadNatsSyncConfigFromFile(cfg.SyncConfigFile)
+	mux := http.NewServeMux()
+	// http exhanges are served under path "httpExhange/<from>/in"
+	syncConf, err := loadNatsSyncConfigFromFile(mux, cfg.SyncConfigFile)
 	if err != nil {
 		slogging.Fatal(log, "failed to load/parse/validate sync config", "err", err)
 	}
@@ -112,7 +114,6 @@ func main() {
 		slogging.Fatal(log, "failed to start nats sync", "err", err)
 	}
 
-	mux := http.NewServeMux()
 	mux.Handle("/metrics", promhttp.Handler())
 	mux.HandleFunc("/debug/pprof/", pprof.Index)
 	mux.HandleFunc("/debug/pprof/heap", pprof.Index)
@@ -120,6 +121,10 @@ func main() {
 	mux.HandleFunc("/debug/pprof/profile", pprof.Profile)
 	mux.HandleFunc("/debug/pprof/symbol", pprof.Symbol)
 	mux.HandleFunc("/debug/pprof/trace", pprof.Trace)
+	// catch all (must be last)
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		log.Debug("http request at unmatched path", "method", r.Method, "url", r.URL)
+	})
 
 	log.Info("starting http server", "address", cfg.HTTPAddress)
 	err = http.ListenAndServe(cfg.HTTPAddress, mux)
@@ -128,7 +133,7 @@ func main() {
 	}
 }
 
-func loadNatsSyncConfigFromFile(filename string) (sync.NatsSyncConfig, error) {
+func loadNatsSyncConfigFromFile(mux *http.ServeMux, filename string) (sync.NatsSyncConfig, error) {
 	f, err := os.Open(filename)
 	if err != nil {
 		return sync.NatsSyncConfig{}, errors.Wrap(err, "failed to open config file")
@@ -140,7 +145,7 @@ func loadNatsSyncConfigFromFile(filename string) (sync.NatsSyncConfig, error) {
 		return sync.NatsSyncConfig{}, errors.Wrap(err, "failed to load config from file")
 	}
 
-	return cfg.ToNatsSyncConfig()
+	return cfg.ToNatsSyncConfig(mux)
 }
 
 func bail(fs *flag.FlagSet, format string, args ...interface{}) {
@@ -158,7 +163,7 @@ type NatsSyncConfigSerialize struct {
 }
 
 // convert to NatsSyncConfig and validate
-func (c NatsSyncConfigSerialize) ToNatsSyncConfig() (sync.NatsSyncConfig, error) {
+func (c NatsSyncConfigSerialize) ToNatsSyncConfig(mux *http.ServeMux) (sync.NatsSyncConfig, error) {
 	result := sync.NatsSyncConfig{
 		Deployment:            c.Deployment,
 		IsSyncSource:          c.IsSyncSource,
@@ -180,6 +185,28 @@ func (c NatsSyncConfigSerialize) ToNatsSyncConfig() (sync.NatsSyncConfig, error)
 				return result, err
 			}
 			result.Exchanges[d] = ex
+		}
+
+		if v.HttpExchangeEnabled {
+			v.HttpExchangeConfig.From = c.Deployment
+			v.HttpExchangeConfig.To = d
+			ex, err := sync.NewHTTPExchange(v.HttpExchangeConfig)
+			if err != nil {
+				return result, err
+			}
+
+			log := slog.With("module", "sync/cmd", "op", "ToNatsSyncConfig",
+				"from", c.Deployment, "to", d, "clientURL", v.HttpExchangeConfig.ClientURL)
+			expectedSuffix := fmt.Sprintf("/httpExchange/%s/in", c.Deployment.String())
+			if !strings.HasSuffix(v.HttpExchangeConfig.ClientURL, expectedSuffix) {
+				log.Warn("unexpected clientURL suffix", "expected.suffix", expectedSuffix)
+			}
+
+			path := fmt.Sprintf("/httpExchange/%s/in", d)
+			mux.Handle(path, ex)
+			result.Exchanges[d] = ex
+
+			log.Debug("registered HTTPExchange", "path", path)
 		}
 	}
 
@@ -206,6 +233,8 @@ type DeploymentSetting struct {
 	ExchangeOperationTimeout                             time.Duration           `yaml:"exchangeOperationTimeout"`
 	FileExchangeEnabled                                  bool                    `yaml:"fileExchangeEnabled"`
 	FileExchangeConfig                                   sync.FileExchangeConfig `yaml:"fileExchangeConfig"`
+	HttpExchangeEnabled                                  bool                    `yaml:"httpExchangeEnabled"`
+	HttpExchangeConfig                                   sync.HTTPExchangeConfig `yaml:"httpExchangeConfig"`
 }
 
 func (d DeploymentSetting) ToCommunicationSettings() (sync.CommunicationSettings, error) {
