@@ -366,6 +366,7 @@ func (s *state) MarkDispatched(b *v1.MessageBatch) DispatchReport {
 		err := w.MarkDispatched(ack)
 		if err != nil {
 			msgsErrs[key] = errors.Wrap(err, "failed to mark dispatched")
+			continue
 		}
 
 		// only remove messages included in the batch
