@@ -631,6 +631,7 @@ func (ns *natsSync) sinkProcessIncoming(ctx context.Context, log *slog.Logger) {
 				"msgsRange", r.String(),
 				"lastPair", lastPair.String())
 
+			// received message with range before last published
 			if lastPair.SourceSequence > r.To {
 				err := ns.state.SinkCommitReject(msgs, lastPair.SourceSequence)
 				if err != nil {
@@ -643,8 +644,11 @@ func (ns *natsSync) sinkProcessIncoming(ctx context.Context, log *slog.Logger) {
 				continue
 			}
 
+			// received message with range after last published
 			if lastPair.SourceSequence < r.From {
-				if skipCount >= ns.cs.PendingIncomingMessagesPrSubscriptionDeleteThreshold {
+				// reject empty/heartbeat messages immediately
+				// or if we have received too many messages
+				if r.From == r.To || skipCount >= ns.cs.PendingIncomingMessagesPrSubscriptionDeleteThreshold {
 					err = ns.state.SinkCommitReject(msgs, lastPair.SourceSequence)
 					if err != nil {
 						mErr.Inc()
