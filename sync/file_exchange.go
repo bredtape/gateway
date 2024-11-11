@@ -375,6 +375,10 @@ func startPollDirectory(ctx context.Context, startDelay, interval, retryInterval
 					if x.IsDir() {
 						continue
 					}
+					if strings.HasPrefix(path.Base(x.Name()), ".") {
+						continue
+					}
+
 					select {
 					case <-ctx.Done():
 						return
