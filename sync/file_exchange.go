@@ -161,7 +161,11 @@ func (ex *FileExchange) StartReceiving(ctx context.Context) (<-chan *v1.MessageB
 				if !ok {
 					return
 				}
-				log2 := log.With("source", "polling", "basename", path.Base(event.Name), "op", event.Op.String())
+				if isTempFile(event.Name) {
+					continue
+				}
+
+				log2 := log.With("source", "event", "basename", path.Base(event.Name), "op", event.Op.String())
 				log2.Log(ctx, slog.LevelDebug-6, "received event")
 
 				if event.Op.Has(fsnotify.Create) {
@@ -273,6 +277,9 @@ func (ex *FileExchange) consumeFile(filename string) (*v1.MessageBatch, error) {
 var reBaseMatch = regexp.MustCompile(`^([0-9]{6})_(sha256=X(?:[A-Za-z0-9-_]{4})*(?:[A-Za-z0-9-_]{2}==|[A-Za-z0-9-_]{3}=)?).me$`)
 
 func isRelevantFile(filename string) bool {
+	if isTempFile(filename) {
+		return false
+	}
 	return strings.HasSuffix(path.Base(filename), ".me")
 }
 
@@ -375,7 +382,7 @@ func startPollDirectory(ctx context.Context, startDelay, interval, retryInterval
 					if x.IsDir() {
 						continue
 					}
-					if strings.HasPrefix(path.Base(x.Name()), ".") {
+					if isTempFile(x.Name()) {
 						continue
 					}
 
@@ -398,4 +405,8 @@ func startPollDirectory(ctx context.Context, startDelay, interval, retryInterval
 	}()
 
 	return ch
+}
+
+func isTempFile(filename string) bool {
+	return strings.HasPrefix(path.Base(filename), ".")
 }
