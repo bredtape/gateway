@@ -141,7 +141,7 @@ func (ex *FileExchange) StartReceiving(ctx context.Context) (<-chan *v1.MessageB
 				log2.Log(ctx, slog.LevelDebug-3, "received filename")
 				msg, err := ex.consumeFile(filename)
 				if err != nil {
-					log2.Error("failed to unmarshal", "err", err)
+					log2.Error("failed to consume file", "err", err)
 					continue
 				}
 
@@ -167,7 +167,7 @@ func (ex *FileExchange) StartReceiving(ctx context.Context) (<-chan *v1.MessageB
 				if event.Op.Has(fsnotify.Create) {
 					msg, err := ex.consumeFile(event.Name)
 					if err != nil {
-						log2.Error("failed to unmarshal", "err", err, "filename", event.Name, "op", event.Op.String())
+						log2.Error("failed to consume file", "err", err, "filename", event.Name, "op", event.Op.String())
 						continue
 					}
 
