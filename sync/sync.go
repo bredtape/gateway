@@ -335,6 +335,12 @@ func (ns *natsSync) loop(ctx context.Context, log *slog.Logger) error {
 				if !report.IsEmpty() {
 					mErr.Inc()
 					log.Debug("mark dispatched failed", "report", report)
+
+					for k, e := range report.MessagesErrors {
+						if errors.Is(e, ErrSourceSequenceBroken) {
+							ns.sourceCancelSubscription(log, k)
+						}
+					}
 				}
 			}
 
