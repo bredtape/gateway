@@ -256,7 +256,7 @@ func (ex *FileExchange) consumeFile(filename string) (*v1.MessageBatch, error) {
 		return nil, nil
 	}
 
-	err = verifyHash(data, filename)
+	err = checkHashAgainstFileName(hashSHA256AndBase64(data), filename)
 	if err != nil {
 		return nil, errors.Wrap(err, "failed to verify hash")
 	}
@@ -289,12 +289,10 @@ func hashSHA256AndBase64(data []byte) string {
 	return "sha256=X" + base64.URLEncoding.EncodeToString(d.Sum(nil))
 }
 
-func verifyHash(data []byte, filename string) error {
-	hash := hashSHA256AndBase64(data)
-
+func checkHashAgainstFileName(hash, filename string) error {
 	matches := reBaseMatch.FindStringSubmatch(path.Base(filename))
 	if len(matches) != 3 {
-		return errors.New("filename does not match expected format")
+		return fmt.Errorf("filename '%s' does not match expected format", filename)
 	}
 
 	if matches[2] != hash {

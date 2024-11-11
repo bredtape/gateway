@@ -120,6 +120,11 @@ func TestFileIOWatchAfterWrite(t *testing.T) {
 	}
 }
 
+func TestFileExhangeVerifyHash(t *testing.T) {
+	filename := "000001_sha256=Xp6jbmSOX-ibQbWf8rXEx6wwixk5PmODzugpf7ud5j-U=.me"
+	assert.NoError(t, checkHashAgainstFileName("sha256=Xp6jbmSOX-ibQbWf8rXEx6wwixk5PmODzugpf7ud5j-U=", filename))
+}
+
 func getConfig(t *testing.T) FileExchangeConfig {
 	return FileExchangeConfig{
 		IncomingDir:          t.TempDir(),
